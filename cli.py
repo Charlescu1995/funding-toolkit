@@ -31,16 +31,20 @@ def build_connectors(offline: bool) -> list:
 
         return [binance_offline(), bybit_offline(), hyperliquid_offline()]
 
-    from connectors.cex_ccxt import binance, bybit
+    from connectors.cex_ccxt import ALL_CEX_FACTORIES
     from connectors.dex_hyperliquid import HyperliquidConnector
 
-    return [binance(), bybit(), HyperliquidConnector()]
+    return [factory() for factory in ALL_CEX_FACTORIES] + [HyperliquidConnector()]
 
 
 def fetch_all(connectors: list) -> list[FundingRate]:
     all_rates: list[FundingRate] = []
     for conn in connectors:
-        rates = conn.fetch_funding_rates()
+        try:
+            rates = conn.fetch_funding_rates()
+        except Exception as exc:
+            console.print(f"  [dim]{conn.name:<14}[/dim] -> [red]error: {type(exc).__name__}: {exc}[/red]")
+            continue
         console.print(f"  [dim]{conn.name:<14}[/dim] -> {len(rates)} pares")
         all_rates.extend(rates)
     return all_rates

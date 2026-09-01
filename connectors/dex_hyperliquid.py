@@ -34,17 +34,16 @@ class HyperliquidConnector:
         self._timeout = timeout
 
     def fetch_funding_rates(self) -> list[FundingRate]:
-        try:
-            resp = self._session.post(
-                INFO_URL,
-                json={"type": "metaAndAssetCtxs"},
-                timeout=self._timeout,
-            )
-            resp.raise_for_status()
-            meta, asset_ctxs = resp.json()
-        except Exception:
-            logger.exception("Fallo al pedir funding rates a Hyperliquid")
-            return []
+        # Igual que en cex_ccxt.py: dejamos que la excepción suba en vez de
+        # tragarla aquí, para que core/data_service.py pueda enseñar el
+        # motivo real del fallo en vez de un simple "0 pares".
+        resp = self._session.post(
+            INFO_URL,
+            json={"type": "metaAndAssetCtxs"},
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        meta, asset_ctxs = resp.json()
 
         universe = meta.get("universe", [])
         out: list[FundingRate] = []

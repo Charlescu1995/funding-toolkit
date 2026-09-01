@@ -108,15 +108,23 @@ if refresh:
     load_data.clear()
 
 try:
-    all_rates, counts = load_data(offline)
+    all_rates, counts, errors = load_data(offline)
 except Exception as e:
     st.error(f"No se pudo obtener datos: {e}")
     st.stop()
 
+# Un exchange caído no debe ocultarse en un "0 pares" silencioso — si Binance
+# (por ejemplo) bloquea la IP del servidor, esto lo dice explícitamente en
+# vez de dejarte adivinar por qué la tabla sale más corta de lo esperado.
+if errors:
+    lines = "\n".join(f"- **{ex}**: {msg}" for ex, msg in errors.items())
+    st.warning(f"Algunos exchanges no respondieron:\n\n{lines}", icon="⚠️")
+
 if not all_rates:
-    st.warning(
-        "No se obtuvo ningún dato de los exchanges. Si estás en modo **En vivo**, comprueba que este "
-        "entorno tiene salida a internet real hacia los exchanges (el sandbox de desarrollo de Claude no la tiene)."
+    st.error(
+        "No se obtuvo ningún dato de ningún exchange. Revisa los errores de arriba — "
+        "lo más probable es que el exchange esté bloqueando la IP de este servidor, "
+        "no que no tengas internet."
     )
     st.stop()
 

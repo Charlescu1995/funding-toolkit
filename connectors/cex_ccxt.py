@@ -59,11 +59,15 @@ class CexConnector:
         self._client = getattr(ccxt, ccxt_id)({"enableRateLimit": True})
 
     def fetch_funding_rates(self) -> list[FundingRate]:
-        try:
-            raw = self._client.fetch_funding_rates()
-        except Exception:
-            logger.exception("Fallo al pedir funding rates a %s", self.ccxt_id)
-            return []
+        # Ojo: aquí ya NO se traga la excepción con un try/except silencioso.
+        # Antes lo hacía y devolvía [] — lo cual, visto desde fuera, es
+        # indistinguible de "este exchange no tiene datos ahora mismo" cuando
+        # en realidad puede ser que Binance esté bloqueando la IP del
+        # servidor (muy típico en Binance Futures desde IPs de EEUU/cloud).
+        # Dejamos que la excepción suba para que quien llame pueda decidir
+        # qué hacer con el motivo real del fallo (core/data_service.py lo
+        # captura y lo enseña en la interfaz).
+        raw = self._client.fetch_funding_rates()
 
         interval_default = DEFAULT_INTERVAL_HOURS.get(self.ccxt_id, 8)
         out: list[FundingRate] = []
@@ -138,3 +142,30 @@ def binance() -> CexConnector:
 
 def bybit() -> CexConnector:
     return CexConnector("bybit")
+
+
+def okx() -> CexConnector:
+    return CexConnector("okx")
+
+
+def bitget() -> CexConnector:
+    return CexConnector("bitget")
+
+
+def kucoin() -> CexConnector:
+    return CexConnector("kucoinfutures")
+
+
+def gate() -> CexConnector:
+    return CexConnector("gate")
+
+
+def mexc() -> CexConnector:
+    return CexConnector("mexc")
+
+
+def htx() -> CexConnector:
+    return CexConnector("htx")
+
+
+ALL_CEX_FACTORIES = [binance, bybit, okx, bitget, kucoin, gate, mexc, htx]

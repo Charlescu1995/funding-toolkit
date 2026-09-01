@@ -1,0 +1,7 @@
+[
+  {"symbol": "BTC", "raw_symbol": "BTC/USDT:USDT", "funding_rate": 0.0001, "interval_hours": 8, "mark_price": 112438.0, "open_interest_usd": 1800000000},
+  {"symbol": "ETH", "raw_symbol": "ETH/USDT:USDT", "funding_rate": 0.0006, "interval_hours": 8, "mark_price": 4209.5, "open_interest_usd": 720000000},
+  {"symbol": "SOL", "raw_symbol": "SOL/USDT:USDT", "funding_rate": 0.0008, "interval_hours": 8, "mark_price": 198.5, "open_interest_usd": 240000000},
+  {"symbol": "XRP", "raw_symbol": "XRP/USDT:USDT", "funding_rate": -0.0010, "interval_hours": 8, "mark_price": 2.41, "open_interest_usd": 310000000},
+  {"symbol": "ARB", "raw_symbol": "ARB/USDT:USDT", "funding_rate": 0.0032, "interval_hours": 8, "mark_price": 0.68, "open_interest_usd": 40000000}
+]

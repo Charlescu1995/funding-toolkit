@@ -1,0 +1,14 @@
+# Nunca subas tus claves
+.env
+
+# Base de datos local de histórico (se genera sola al correr la app)
+data/*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Streamlit
+.streamlit/secrets.toml

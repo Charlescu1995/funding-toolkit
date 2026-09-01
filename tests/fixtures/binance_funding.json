@@ -1,0 +1,7 @@
+[
+  {"symbol": "BTC", "raw_symbol": "BTC/USDT:USDT", "funding_rate": 0.0003, "interval_hours": 8, "mark_price": 112450.2, "open_interest_usd": 5200000000},
+  {"symbol": "ETH", "raw_symbol": "ETH/USDT:USDT", "funding_rate": 0.0010, "interval_hours": 8, "mark_price": 4210.8, "open_interest_usd": 2100000000},
+  {"symbol": "SOL", "raw_symbol": "SOL/USDT:USDT", "funding_rate": -0.0002, "interval_hours": 8, "mark_price": 198.4, "open_interest_usd": 650000000},
+  {"symbol": "DOGE", "raw_symbol": "DOGE/USDT:USDT", "funding_rate": 0.0045, "interval_hours": 8, "mark_price": 0.212, "open_interest_usd": 210000000},
+  {"symbol": "PEPE", "raw_symbol": "PEPE/USDT:USDT", "funding_rate": 0.0120, "interval_hours": 8, "mark_price": 0.0000092, "open_interest_usd": 85000000}
+]

@@ -26,10 +26,12 @@ class OpportunityRow:
     long_venue: VenueType
     long_raw_symbol: str
     long_apr: float
+    long_mark_price: float | None
     short_exchange: str
     short_venue: VenueType
     short_raw_symbol: str
     short_apr: float
+    short_mark_price: float | None
     spread_apr: float
     consistency_pct: float | None
     consistency_samples: int
@@ -71,10 +73,12 @@ def compute_opportunities(
                 long_venue=long_leg.venue_type,
                 long_raw_symbol=long_leg.raw_symbol,
                 long_apr=long_leg.apr_pct,
+                long_mark_price=long_leg.mark_price,
                 short_exchange=short_leg.exchange,
                 short_venue=short_leg.venue_type,
                 short_raw_symbol=short_leg.raw_symbol,
                 short_apr=short_leg.apr_pct,
+                short_mark_price=short_leg.mark_price,
                 spread_apr=spread,
                 consistency_pct=cons_pct,
                 consistency_samples=cons_samples,
@@ -89,10 +93,11 @@ def compute_opportunities(
     return rows
 
 
-OiTarget = tuple[str, str]  # (exchange, raw_symbol)
+OiTarget = tuple[str, str]  # (exchange, raw_symbol) — clave para aplicar el resultado sobre una oportunidad
+OiRequest = tuple[str, str, float | None]  # (exchange, raw_symbol, mark_price) — lo que de verdad se pide
 
 
-def collect_oi_targets(opportunities: list[OpportunityRow], top_n: int = 10) -> tuple[OiTarget, ...]:
+def collect_oi_targets(opportunities: list[OpportunityRow], top_n: int = 10) -> tuple[OiRequest, ...]:
     """
     Qué piernas de las `top_n` mejores oportunidades todavía no tienen OI
     (típicamente los CEX — Hyperliquid ya lo trae en el fetch original).
@@ -101,26 +106,32 @@ def collect_oi_targets(opportunities: list[OpportunityRow], top_n: int = 10) -> 
     miles de oportunidades sería lento y quemaría el rate limit para nada —
     solo importa la profundidad de las pocas que ya decidiste mirar.
 
+    Se lleva también el mark_price de cada pierna (ya lo tenemos del fetch de
+    funding rates) porque algún exchange (bitget, por ejemplo) responde el
+    open interest en contratos pero sin resolver a USD — ahí hace falta el
+    precio para poder calcularlo nosotros mismos (contratos × precio).
+
     Devuelve una tupla (hashable) a propósito, para poder cachear el fetch
     en la capa que lo llame (la página Streamlit) sin tener que hacer
     hashable un dataclass mutable.
     """
-    targets: set[OiTarget] = set()
+    targets: dict[OiTarget, float | None] = {}
     for opp in opportunities[:top_n]:
         for side in ("long", "short"):
             if getattr(opp, f"{side}_venue") == VenueType.CEX and getattr(opp, f"oi_{side}_usd") is None:
-                targets.add((getattr(opp, f"{side}_exchange"), getattr(opp, f"{side}_raw_symbol")))
-    return tuple(sorted(targets))
+                key = (getattr(opp, f"{side}_exchange"), getattr(opp, f"{side}_raw_symbol"))
+                targets.setdefault(key, getattr(opp, f"{side}_mark_price"))
+    return tuple(sorted((exchange, raw_symbol, price) for (exchange, raw_symbol), price in targets.items()))
 
 
 def fetch_oi_for_targets(
-    targets: tuple[OiTarget, ...],
+    requests: tuple[OiRequest, ...],
 ) -> tuple[dict[OiTarget, float], dict[OiTarget, str]]:
     """
-    Pide el OI real a cada exchange CEX para la lista de (exchange, raw_symbol)
-    dada. Entrada y salida son hashable/serializables a propósito, para que
-    quien llame (la página Streamlit) pueda envolver esto en su propia caché
-    sin arrastrar objetos de conexión.
+    Pide el OI real a cada exchange CEX para la lista de (exchange, raw_symbol,
+    mark_price) dada. Entrada y salida son hashable/serializables a propósito,
+    para que quien llame (la página Streamlit) pueda envolver esto en su
+    propia caché sin arrastrar objetos de conexión.
 
     Devuelve (oi_por_target, errores_por_target) — igual que
     fetch_normalized_rates() en core/data_service.py, el motivo de un fallo
@@ -129,23 +140,23 @@ def fetch_oi_for_targets(
     """
     from connectors.cex_ccxt import CEX_FACTORY_BY_NAME
 
-    by_exchange: dict[str, list[str]] = defaultdict(list)
-    for exchange, raw_symbol in targets:
-        by_exchange[exchange].append(raw_symbol)
+    by_exchange: dict[str, list[tuple[str, float | None]]] = defaultdict(list)
+    for exchange, raw_symbol, mark_price in requests:
+        by_exchange[exchange].append((raw_symbol, mark_price))
 
     result: dict[OiTarget, float] = {}
     errors: dict[OiTarget, str] = {}
-    for exchange, raw_symbols in by_exchange.items():
+    for exchange, symbol_requests in by_exchange.items():
         factory = CEX_FACTORY_BY_NAME.get(exchange)
         if factory is None:
-            for raw_symbol in raw_symbols:
+            for raw_symbol, _ in symbol_requests:
                 errors[(exchange, raw_symbol)] = "exchange sin conector OI registrado (CEX_FACTORY_BY_NAME)"
             continue
         try:
-            oi_map, oi_errors = factory().fetch_open_interest_usd(raw_symbols)
+            oi_map, oi_errors = factory().fetch_open_interest_usd(symbol_requests)
         except Exception as exc:
             logger.debug("Sin OI disponible para %s", exchange, exc_info=True)
-            for raw_symbol in raw_symbols:
+            for raw_symbol, _ in symbol_requests:
                 errors[(exchange, raw_symbol)] = f"{type(exc).__name__}: {exc}"
             continue
         for raw_symbol, value in oi_map.items():

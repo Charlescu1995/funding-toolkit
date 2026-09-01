@@ -131,10 +131,11 @@ def load_data(offline: bool):
 
 
 @st.cache_data(ttl=60, show_spinner="Consultando profundidad (OI) de las mejores oportunidades...")
-def load_oi_map(targets: tuple[tuple[str, str], ...]):
-    # `targets` es una tupla (hashable) a propósito — así st.cache_data puede
-    # cachear esto sin que le pasemos objetos de conector de ccxt, que no son
-    # cacheables. Ver core/opportunities.py: collect_oi_targets/fetch_oi_for_targets.
+def load_oi_map(targets: tuple[tuple[str, str, float | None], ...]):
+    # `targets` es una tupla (hashable) a propósito, con el mark_price incluido
+    # (exchange, raw_symbol, mark_price) — así st.cache_data puede cachear esto
+    # sin que le pasemos objetos de conector de ccxt, que no son cacheables.
+    # Ver core/opportunities.py: collect_oi_targets/fetch_oi_for_targets.
     # Devuelve (oi_map, errores) — los errores se guardan para poder verlos en
     # el panel de diagnóstico, igual que con los errores de funding rates.
     if not targets:

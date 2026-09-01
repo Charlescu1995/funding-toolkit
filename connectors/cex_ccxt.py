@@ -102,7 +102,9 @@ class CexConnector:
 
         return out
 
-    def fetch_open_interest_usd(self, raw_symbols: list[str]) -> tuple[dict[str, float], dict[str, str]]:
+    def fetch_open_interest_usd(
+        self, requests: list[tuple[str, float | None]]
+    ) -> tuple[dict[str, float], dict[str, str]]:
         """
         Trae el open interest (en USD) para una lista concreta de símbolos.
 
@@ -113,6 +115,13 @@ class CexConnector:
         (las que salen arriba en el ranking), que es cuando de verdad hace
         falta saber la profundidad.
 
+        `requests` es una lista de (raw_symbol, mark_price) — el mark_price
+        viene del fetch de funding rates y es el fallback para exchanges como
+        bitget: ccxt les responde `openInterestAmount` (contratos) pero no
+        `openInterestValue` (USD). En vez de dejarlo sin resolver, se calcula
+        contratos × precio de marca — es justo el cálculo que haría el propio
+        exchange para dar el USD directamente.
+
         Devuelve (oi_por_símbolo, errores_por_símbolo). Igual que con
         fetch_funding_rates(): no nos tragamos la excepción en silencio — la
         exponemos por símbolo para que se pueda ver en la interfaz POR QUÉ un
@@ -122,7 +131,7 @@ class CexConnector:
         """
         out: dict[str, float] = {}
         errors: dict[str, str] = {}
-        for raw_symbol in raw_symbols:
+        for raw_symbol, mark_price in requests:
             try:
                 info = self._client.fetch_open_interest(raw_symbol)
             except Exception as exc:
@@ -132,13 +141,15 @@ class CexConnector:
             value = info.get("openInterestValue")
             if value is None:
                 amount = info.get("openInterestAmount")
-                # último recurso: sin precio a mano aquí, lo dejamos sin resolver
-                # en vez de inventar un valor con un precio que podría estar viejo
                 if amount is None:
                     errors[raw_symbol] = "sin openInterestValue ni openInterestAmount en la respuesta"
                     continue
-                errors[raw_symbol] = "solo trae openInterestAmount (sin USD) — no resuelto a propósito"
-                continue
+                if mark_price is None:
+                    errors[raw_symbol] = "solo trae openInterestAmount (sin USD) y no hay mark price para estimarlo"
+                    continue
+                # Aproximación estándar (misma que usa el exchange para dar el
+                # USD directamente): contratos × precio de marca del momento.
+                value = amount * mark_price
 
             out[raw_symbol] = float(value)
 

@@ -39,6 +39,7 @@ class NormalizedRate:
     exchange: str
     venue_type: VenueType
     symbol: str
+    raw_symbol: str          # símbolo tal cual lo usa el exchange — hace falta para pedir el OI después
     raw_rate: float          # tasa tal cual la reportó el exchange, para su intervalo nativo
     interval_hours: float
     apr_pct: float           # tasa anualizada, en % → esto es lo que se compara entre exchanges
@@ -75,6 +76,7 @@ def normalize(rate: FundingRate) -> NormalizedRate:
         exchange=rate.exchange,
         venue_type=rate.venue_type,
         symbol=rate.symbol,
+        raw_symbol=rate.raw_symbol,
         raw_rate=rate.funding_rate,
         interval_hours=rate.interval_hours,
         apr_pct=apr,

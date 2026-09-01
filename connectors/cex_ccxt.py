@@ -169,3 +169,17 @@ def htx() -> CexConnector:
 
 
 ALL_CEX_FACTORIES = [binance, bybit, okx, bitget, kucoin, gate, mexc, htx]
+
+# exchange_name (el mismo que NormalizedRate.exchange) -> factory. Se usa para
+# reconstruir un conector concreto cuando hace falta pedir OI Depth solo para
+# las oportunidades que ya salieron arriba en el ranking (ver core/opportunities.py).
+CEX_FACTORY_BY_NAME = {
+    "binanceusdm": binance,
+    "bybit": bybit,
+    "okx": okx,
+    "bitget": bitget,
+    "kucoinfutures": kucoin,
+    "gate": gate,
+    "mexc": mexc,
+    "htx": htx,
+}

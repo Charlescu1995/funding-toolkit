@@ -18,7 +18,18 @@ from core.aggregate import build_matrix, exchange_columns
 from core.data_service import fetch_normalized_rates, filter_rates
 from core.history import WINDOWS_HOURS, historical_apr_all_windows, init_db
 from core.normalize import NormalizedRate
-from core.opportunities import compute_opportunities
+from core.opportunities import (
+    apply_oi_map,
+    collect_oi_targets,
+    compute_opportunities,
+    fetch_oi_for_targets,
+)
+
+# Cuántas oportunidades (de arriba del ranking) se enriquecen con OI Depth
+# real. A propósito no son todas: pedir OI símbolo a símbolo para miles de
+# pares sería lento y quemaría el rate limit para nada — solo importa la
+# profundidad de las pocas que ya decidiste mirar.
+OI_ENRICH_TOP_N = 10
 
 # Paleta compartida con el resto del toolkit (mismo verde/ámbar/rojo que el
 # informe de análisis inicial), para que la matriz se sienta parte de la
@@ -36,6 +47,20 @@ def _apr_cell_color(value: float, vmin: float = -50, vmax: float = 50) -> str:
     t = max(0.0, min(1.0, (value - vmin) / (vmax - vmin)))
     rgb = _lerp_color(_GREEN, _AMBER, t / 0.5) if t < 0.5 else _lerp_color(_AMBER, _RED, (t - 0.5) / 0.5)
     return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
+
+
+def _fmt_usd(value: float | None) -> str:
+    """
+    Formatea OI en USD para mostrar en tabla — con guion para None en vez del
+    "None" literal que enseña st.dataframe cuando el valor real es un NaN/None
+    y se le pasa column_config.NumberColumn. Al pre-formatear como texto
+    nosotros, controlamos el resultado exacto.
+    """
+    if value is None:
+        return "—"
+    if value >= 1_000_000:
+        return f"${value / 1_000_000:,.1f}M"
+    return f"${value:,.0f}"
 
 
 def render_matrix_html(matrix: dict[str, dict[str, NormalizedRate]], columns: list[str]) -> str:
@@ -104,8 +129,19 @@ with st.sidebar:
 def load_data(offline: bool):
     return fetch_normalized_rates(offline)
 
+
+@st.cache_data(ttl=60, show_spinner="Consultando profundidad (OI) de las mejores oportunidades...")
+def load_oi_map(targets: tuple[tuple[str, str], ...]):
+    # `targets` es una tupla (hashable) a propósito — así st.cache_data puede
+    # cachear esto sin que le pasemos objetos de conector de ccxt, que no son
+    # cacheables. Ver core/opportunities.py: collect_oi_targets/fetch_oi_for_targets.
+    if not targets:
+        return {}
+    return fetch_oi_for_targets(targets)
+
 if refresh:
     load_data.clear()
+    load_oi_map.clear()
 
 try:
     all_rates, counts, errors = load_data(offline)
@@ -166,6 +202,14 @@ with tab_ranking:
     if not opportunities:
         st.info("Ningún símbolo está presente en 2+ exchanges con los filtros actuales — no hay spread que calcular.")
     else:
+        # OI Depth real para las mejores oportunidades: los CEX no lo traen
+        # en el fetch masivo de funding rates (ccxt no expone un endpoint
+        # bulk para eso), así que se pide aparte, solo para el top N y con
+        # su propia caché — no en cada re-render.
+        oi_targets = collect_oi_targets(opportunities, top_n=OI_ENRICH_TOP_N)
+        oi_map = load_oi_map(oi_targets)
+        apply_oi_map(opportunities, oi_map, top_n=OI_ENRICH_TOP_N)
+
         df = pd.DataFrame(
             [
                 {
@@ -174,9 +218,10 @@ with tab_ranking:
                     "Short en": f"{o.short_exchange} ({o.short_apr:+.1f}%)",
                     "Spread APR": o.spread_apr,
                     "Consistency (30d)": o.consistency_pct,
-                    "OI long ($)": o.oi_long_usd,
-                    "OI short ($)": o.oi_short_usd,
-                    "Cuello de botella ($)": o.oi_bottleneck_usd,
+                    "OI long ($)": _fmt_usd(o.oi_long_usd),
+                    "OI short ($)": _fmt_usd(o.oi_short_usd),
+                    "Cuello de botella ($)": _fmt_usd(o.oi_bottleneck_usd)
+                    + (f" ({o.oi_bottleneck_side})" if o.oi_bottleneck_side else ""),
                 }
                 for o in opportunities
             ]
@@ -191,14 +236,17 @@ with tab_ranking:
                 "Consistency (30d)": st.column_config.ProgressColumn(
                     format="%.0f%%", min_value=0, max_value=100
                 ),
-                "OI long ($)": st.column_config.NumberColumn(format="$%,.0f"),
-                "OI short ($)": st.column_config.NumberColumn(format="$%,.0f"),
-                "Cuello de botella ($)": st.column_config.NumberColumn(format="$%,.0f"),
+                # OI long/short/Cuello de botella van pre-formateadas como
+                # texto (ver _fmt_usd) a propósito: pasarlas como número con
+                # column_config.NumberColumn enseña el texto literal "None"
+                # para los valores nulos, y no hay forma limpia de evitarlo
+                # desde la config de columna.
             },
         )
         st.caption(
             "Consistency: % del tiempo (30d) que esta asignación long/short habría sido rentable. "
-            "En blanco = sin histórico suficiente todavía."
+            "OI = profundidad de open interest en cada pierna, solo para el top "
+            f"{OI_ENRICH_TOP_N}. «—» = sin dato disponible todavía."
         )
 
 with tab_matrix:

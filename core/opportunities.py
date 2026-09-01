@@ -113,12 +113,19 @@ def collect_oi_targets(opportunities: list[OpportunityRow], top_n: int = 10) -> 
     return tuple(sorted(targets))
 
 
-def fetch_oi_for_targets(targets: tuple[OiTarget, ...]) -> dict[OiTarget, float]:
+def fetch_oi_for_targets(
+    targets: tuple[OiTarget, ...],
+) -> tuple[dict[OiTarget, float], dict[OiTarget, str]]:
     """
     Pide el OI real a cada exchange CEX para la lista de (exchange, raw_symbol)
     dada. Entrada y salida son hashable/serializables a propósito, para que
     quien llame (la página Streamlit) pueda envolver esto en su propia caché
     sin arrastrar objetos de conexión.
+
+    Devuelve (oi_por_target, errores_por_target) — igual que
+    fetch_normalized_rates() en core/data_service.py, el motivo de un fallo
+    se expone en vez de tragárselo, para poder ver en la interfaz POR QUÉ
+    bitget o gate no dan profundidad en vez de solo ver un "—" sin explicar.
     """
     from connectors.cex_ccxt import CEX_FACTORY_BY_NAME
 
@@ -127,19 +134,26 @@ def fetch_oi_for_targets(targets: tuple[OiTarget, ...]) -> dict[OiTarget, float]
         by_exchange[exchange].append(raw_symbol)
 
     result: dict[OiTarget, float] = {}
+    errors: dict[OiTarget, str] = {}
     for exchange, raw_symbols in by_exchange.items():
         factory = CEX_FACTORY_BY_NAME.get(exchange)
         if factory is None:
+            for raw_symbol in raw_symbols:
+                errors[(exchange, raw_symbol)] = "exchange sin conector OI registrado (CEX_FACTORY_BY_NAME)"
             continue
         try:
-            oi_map = factory().fetch_open_interest_usd(raw_symbols)
-        except Exception:
+            oi_map, oi_errors = factory().fetch_open_interest_usd(raw_symbols)
+        except Exception as exc:
             logger.debug("Sin OI disponible para %s", exchange, exc_info=True)
+            for raw_symbol in raw_symbols:
+                errors[(exchange, raw_symbol)] = f"{type(exc).__name__}: {exc}"
             continue
         for raw_symbol, value in oi_map.items():
             result[(exchange, raw_symbol)] = value
+        for raw_symbol, msg in oi_errors.items():
+            errors[(exchange, raw_symbol)] = msg
 
-    return result
+    return result, errors
 
 
 def apply_oi_map(opportunities: list[OpportunityRow], oi_map: dict[OiTarget, float], top_n: int = 10) -> None:
@@ -158,8 +172,13 @@ def apply_oi_map(opportunities: list[OpportunityRow], oi_map: dict[OiTarget, flo
             opp.oi_bottleneck_side = "long" if opp.oi_long_usd <= opp.oi_short_usd else "short"
 
 
-def enrich_oi_depth(opportunities: list[OpportunityRow], top_n: int = 10) -> None:
-    """Atajo sin caché: collect + fetch + apply en un solo paso. Pensado para el CLI (proceso de un solo uso)."""
+def enrich_oi_depth(opportunities: list[OpportunityRow], top_n: int = 10) -> dict[OiTarget, str]:
+    """
+    Atajo sin caché: collect + fetch + apply en un solo paso. Pensado para el
+    CLI (proceso de un solo uso). Devuelve los errores por target, por si
+    quien llama quiere mostrarlos (el CLI los imprime; ver cli.py).
+    """
     targets = collect_oi_targets(opportunities, top_n)
-    oi_map = fetch_oi_for_targets(targets)
+    oi_map, errors = fetch_oi_for_targets(targets)
     apply_oi_map(opportunities, oi_map, top_n)
+    return errors

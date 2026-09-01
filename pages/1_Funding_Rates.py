@@ -135,8 +135,10 @@ def load_oi_map(targets: tuple[tuple[str, str], ...]):
     # `targets` es una tupla (hashable) a propósito — así st.cache_data puede
     # cachear esto sin que le pasemos objetos de conector de ccxt, que no son
     # cacheables. Ver core/opportunities.py: collect_oi_targets/fetch_oi_for_targets.
+    # Devuelve (oi_map, errores) — los errores se guardan para poder verlos en
+    # el panel de diagnóstico, igual que con los errores de funding rates.
     if not targets:
-        return {}
+        return {}, {}
     return fetch_oi_for_targets(targets)
 
 if refresh:
@@ -188,6 +190,7 @@ k4.metric("Última actualización", now_str)
 st.divider()
 
 # ---------- Tabs: Ranking / Matriz / Histórico ----------
+oi_errors: dict[tuple[str, str], str] = {}  # se rellena en la pestaña Ranking, se enseña en Diagnóstico
 tab_ranking, tab_matrix, tab_history = st.tabs(["🏆 Ranking", "🔲 Matriz", "📈 Histórico"])
 
 with tab_ranking:
@@ -207,7 +210,7 @@ with tab_ranking:
         # bulk para eso), así que se pide aparte, solo para el top N y con
         # su propia caché — no en cada re-render.
         oi_targets = collect_oi_targets(opportunities, top_n=OI_ENRICH_TOP_N)
-        oi_map = load_oi_map(oi_targets)
+        oi_map, oi_errors = load_oi_map(oi_targets)
         apply_oi_map(opportunities, oi_map, top_n=OI_ENRICH_TOP_N)
 
         df = pd.DataFrame(
@@ -297,3 +300,11 @@ with tab_history:
 st.divider()
 with st.expander("Diagnóstico: pares traídos por exchange"):
     st.json(counts)
+
+if oi_errors:
+    with st.expander(f"Diagnóstico: OI Depth no disponible para {len(oi_errors)} pierna(s) del top {OI_ENRICH_TOP_N}"):
+        st.caption(
+            "Motivo real por (exchange, símbolo) de por qué esa pierna concreta se queda en «—» "
+            "en vez de mostrar profundidad — no es que falte el dato, es lo que respondió (o no) el exchange."
+        )
+        st.json({f"{ex} · {sym}": msg for (ex, sym), msg in oi_errors.items()})

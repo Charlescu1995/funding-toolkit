@@ -102,7 +102,7 @@ class CexConnector:
 
         return out
 
-    def fetch_open_interest_usd(self, raw_symbols: list[str]) -> dict[str, float]:
+    def fetch_open_interest_usd(self, raw_symbols: list[str]) -> tuple[dict[str, float], dict[str, str]]:
         """
         Trae el open interest (en USD) para una lista concreta de símbolos.
 
@@ -112,13 +112,21 @@ class CexConnector:
         Se usa solo sobre el puñado de oportunidades que ya nos interesan
         (las que salen arriba en el ranking), que es cuando de verdad hace
         falta saber la profundidad.
+
+        Devuelve (oi_por_símbolo, errores_por_símbolo). Igual que con
+        fetch_funding_rates(): no nos tragamos la excepción en silencio — la
+        exponemos por símbolo para que se pueda ver en la interfaz POR QUÉ un
+        exchange concreto no da profundidad (ccxt sin soportar el endpoint
+        para ese exchange, símbolo mal formado, rate limit...), en vez de un
+        "—" mudo que no dice si es un fallo real o simplemente no hay dato.
         """
         out: dict[str, float] = {}
+        errors: dict[str, str] = {}
         for raw_symbol in raw_symbols:
             try:
                 info = self._client.fetch_open_interest(raw_symbol)
-            except Exception:
-                logger.debug("Sin open interest disponible para %s en %s", raw_symbol, self.ccxt_id)
+            except Exception as exc:
+                errors[raw_symbol] = f"{type(exc).__name__}: {exc}"
                 continue
 
             value = info.get("openInterestValue")
@@ -127,13 +135,14 @@ class CexConnector:
                 # último recurso: sin precio a mano aquí, lo dejamos sin resolver
                 # en vez de inventar un valor con un precio que podría estar viejo
                 if amount is None:
+                    errors[raw_symbol] = "sin openInterestValue ni openInterestAmount en la respuesta"
                     continue
-                value = None
+                errors[raw_symbol] = "solo trae openInterestAmount (sin USD) — no resuelto a propósito"
+                continue
 
-            if value is not None:
-                out[raw_symbol] = float(value)
+            out[raw_symbol] = float(value)
 
-        return out
+        return out, errors
 
 
 def binance() -> CexConnector:

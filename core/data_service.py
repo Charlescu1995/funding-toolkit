@@ -22,12 +22,13 @@ def build_connectors(offline: bool) -> list:
         return [binance_offline(), bybit_offline(), hyperliquid_offline()]
 
     from connectors.cex_ccxt import ALL_CEX_FACTORIES
-    from connectors.dex_hyperliquid import HyperliquidConnector
+    from connectors.dex_registry import ALL_DEX_FACTORIES
 
     # Varios CEX a la vez, no solo Binance/Bybit: si uno bloquea la IP del
     # servidor (Binance Futures lo hace con bastantes proveedores cloud), los
-    # demás siguen respondiendo en vez de dejar la tabla vacía.
-    return [factory() for factory in ALL_CEX_FACTORIES] + [HyperliquidConnector()]
+    # demás siguen respondiendo en vez de dejar la tabla vacía. Lo mismo con
+    # los DEX: si Lighter o Paradex fallan, Hyperliquid y el resto siguen.
+    return [factory() for factory in ALL_CEX_FACTORIES] + [factory() for factory in ALL_DEX_FACTORIES]
 
 
 def fetch_normalized_rates(

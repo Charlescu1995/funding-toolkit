@@ -32,9 +32,9 @@ def build_connectors(offline: bool) -> list:
         return [binance_offline(), bybit_offline(), hyperliquid_offline()]
 
     from connectors.cex_ccxt import ALL_CEX_FACTORIES
-    from connectors.dex_hyperliquid import HyperliquidConnector
+    from connectors.dex_registry import ALL_DEX_FACTORIES
 
-    return [factory() for factory in ALL_CEX_FACTORIES] + [HyperliquidConnector()]
+    return [factory() for factory in ALL_CEX_FACTORIES] + [factory() for factory in ALL_DEX_FACTORIES]
 
 
 def fetch_all(connectors: list) -> list[FundingRate]:

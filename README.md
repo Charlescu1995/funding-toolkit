@@ -8,15 +8,32 @@ ProFunding, Loris Tools y el selector delta-neutral de John5Cripto.
 Vamos construyéndola paso a paso. Progreso:
 
 - [x] Paso 1 — Arquitectura del proyecto y modelo de datos común
-- [x] Paso 2 — Conectores de datos: CEX (Binance, Bybit vía ccxt) + DEX (Hyperliquid, API directa)
+- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 5 DEX vía API directa (Hyperliquid, Lighter, Paradex, Extended, Pacifica)
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
-- [x] Paso 5 — Consistency Score y OI Depth
+- [x] Paso 5 — Consistency Score y OI Depth (con fallback contratos×mark_price para exchanges que no dan el USD directo)
 - [x] Paso 6 — Vista ranking + vista matriz (CLI), con filtros por venue/exchange
-- [x] Paso 9 — Interfaz Streamlit (Home + página Funding Rates: Ranking / Matriz / Histórico)
+- [x] Paso 9 — Interfaz Streamlit (Home + página Funding Rates: Ranking / Matriz / Histórico), desplegada en Streamlit Cloud
 - [ ] Paso 7 — Alertas por Telegram (pendiente, a petición tuya)
 - [ ] Paso 8 — Módulo de ejecución (pendiente, a petición tuya)
-- [ ] Paso 10 — Desplegar en Streamlit Cloud (URL fija, real)
+- [ ] Scheduler de snapshots en producción (pendiente, a petición tuya) — sin esto, Consistency Score e Histórico se quedan en blanco en el despliegue real
+
+### DEX nuevos (Lighter, Paradex, Extended, Pacifica) — pendiente de verificar en vivo
+
+Estos 4 conectores se construyeron a partir de la documentación pública de cada API
+(no se pudieron probar contra la red real desde este entorno de desarrollo, que solo
+tiene salida a PyPI). Antes de fiarte de sus números al 100%, comprueba en el
+despliegue real:
+
+- **Intervalo de funding**: Lighter/Extended/Pacifica = 1h, Paradex = 8h (documentado
+  explícitamente). Si el APR de alguno sale desproporcionado (ej. x8 de más o de
+  menos), revisa `INTERVAL_HOURS` en `connectors/dex_<nombre>.py`.
+- **Unidades del Open Interest**: Extended da el OI ya en USD directamente
+  (`openInterest`, distinto de `openInterestBase`). Lighter, Paradex y Pacifica NO
+  documentan explícitamente la unidad de su campo de OI — se asumió que es en
+  unidades del activo base (igual que Hyperliquid) y se multiplica por el mark
+  price para sacar el USD. Si al desplegar el OI de estos tres sale absurdamente
+  alto o bajo, esa multiplicación es la primera sospechosa.
 
 ## Importante sobre dónde correr esto
 

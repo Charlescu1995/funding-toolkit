@@ -16,6 +16,17 @@ Docs: https://apidocs.lighter.xyz/reference/funding-rates
 Nota sobre unidades: `open_interest` en orderBookDetails viene en unidades
 del activo base (ej. cuántos BTC de OI), no en USD — igual que Hyperliquid,
 hace falta multiplicar por el mark price para tener el USD.
+
+Nota importante sobre /funding-rates: NO es un endpoint solo de Lighter — es
+un endpoint de comparación que trae, para un universo amplio de símbolos, la
+tasa de varios exchanges de referencia (binance, bybit, hyperliquid) junto a
+la propia de Lighter, y ese universo incluye símbolos que Lighter ni
+siquiera lista (comprobado en vivo: aparecen tickers de acciones como "GME",
+"ORCL", "TTWO" con exchange="binance", sin fila "lighter" correspondiente).
+Por eso este conector es estricto: solo se queda con la fila cuyo `exchange`
+sea exactamente "lighter"; si un mercado no tiene esa fila, se descarta en
+vez de arriesgarse a etiquetar la tasa de otro exchange como si fuera propia
+de Lighter (bug real, encontrado y corregido tras probar contra la API en vivo).
 """
 
 from __future__ import annotations
@@ -71,13 +82,19 @@ class LighterConnector:
             open_interest = row.get("open_interest")
             depth_by_market[market_id] = (mark_price, open_interest)
 
-        # El endpoint puede traer, además de la tasa propia de Lighter, tasas
-        # de referencia de otros exchanges bajo el mismo market_id (para eso
-        # existe el campo `exchange`). Agrupamos primero por mercado y nos
-        # quedamos con la fila marcada "lighter"; si ese mercado solo tiene
-        # una fila sin ambigüedad la usamos tal cual, y si hay varias filas
-        # sin ninguna marcada "lighter" la saltamos en vez de arriesgarnos a
-        # etiquetar como propia la tasa de otro exchange.
+        # /api/v1/funding-rates es, en realidad, un endpoint de COMPARACIÓN:
+        # trae, para un universo amplio de símbolos, la tasa de varios
+        # exchanges de referencia (binance, bybit, hyperliquid) junto a la
+        # propia de Lighter — y ese universo incluye símbolos que Lighter NI
+        # SIQUIERA LISTA (se ha visto en vivo "GME", "ORCL", "TTWO",
+        # "SAMSUNG"... tickers de acciones, no perpetuos de Lighter). Antes
+        # este conector caía a "si solo hay una fila, es la propia" cuando no
+        # encontraba una fila marcada "lighter" — y esa fila única resultó
+        # ser, en la práctica, la referencia de OTRO exchange para un mercado
+        # que Lighter no soporta, mal etiquetada como si fuera de Lighter.
+        # Ahora es estricto: si no hay fila marcada "lighter" para ese
+        # mercado, se descarta sin más — mejor no traer ese símbolo que
+        # traerlo con la tasa de otro exchange puesta a su nombre.
         rows_by_market: dict[int, list[dict]] = {}
         for row in funding_rows:
             market_id = row.get("market_id")
@@ -89,14 +106,7 @@ class LighterConnector:
         for market_id, rows in rows_by_market.items():
             own_row = next((r for r in rows if str(r.get("exchange", "")).lower() == "lighter"), None)
             if own_row is None:
-                if len(rows) == 1:
-                    own_row = rows[0]
-                else:
-                    logger.debug(
-                        "Lighter: %d filas de funding para market_id=%s y ninguna marcada 'lighter' — se descarta",
-                        len(rows), market_id,
-                    )
-                    continue
+                continue
 
             symbol = own_row.get("symbol")
             rate = own_row.get("rate")

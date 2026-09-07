@@ -33,7 +33,39 @@ despliegue real:
   documentan explícitamente la unidad de su campo de OI — se asumió que es en
   unidades del activo base (igual que Hyperliquid) y se multiplica por el mark
   price para sacar el USD. Si al desplegar el OI de estos tres sale absurdamente
-  alto o bajo, esa multiplicación es la primera sospechosa.
+  alto o bajo, esa multiplicación es la primera sospechosa. **Este punto solo se
+  ha verificado en vivo para Lighter (ver abajo) — Paradex y Pacifica siguen sin
+  contrastar contra la red real.**
+
+#### Bug real encontrado y corregido: Lighter mezclaba datos de otros exchanges
+
+Con el primer despliegue real, el ranking salía dominado por "lighter" con valores
+extremos y repetidos (ej. "+84.1%" en varios símbolos sin relación entre sí). Se
+investigó contra la API en vivo de Lighter y se confirmó la causa: `/api/v1/funding-rates`
+no es un endpoint solo de Lighter, es un endpoint de COMPARACIÓN que trae, para un
+universo amplio de símbolos, la tasa de exchanges de referencia (binance, bybit,
+hyperliquid) junto a la propia de Lighter — y ese universo incluye símbolos que
+Lighter ni siquiera lista (se vieron en vivo tickers de acciones como "GME", "ORCL",
+"TTWO", solo con fila `exchange:"binance"`, sin fila `"lighter"`).
+
+El conector original, cuando un mercado no tenía una fila marcada `"lighter"`, caía a
+"si solo hay una fila, es la propia" — y esa fila única resultó ser, en la práctica,
+la tasa de otro exchange mal etiquetada como si fuera de Lighter. Eso es lo que
+inflaba el ranking. **Ya está corregido**: ahora el conector es estricto, solo se
+queda con la fila cuyo `exchange` sea exactamente `"lighter"`, y descarta el mercado
+si esa fila no existe (verificado con un test que reproduce el escenario exacto).
+
+Aparte del bug, quedaba una duda sobre si los valores de Lighter que SÍ pasan el
+filtro están en la escala correcta: al comparar `/funding-rates` (tasa "actual") con
+`/fundings` (histórico de eventos de funding ya liquidados) para BTC, salían números
+distintos. La hipótesis más probable, respaldada por campos `funding_clamp_small` /
+`funding_clamp_big` que trae la API, es que `/funding-rates` enseña la tasa YA
+aplicada (con el clamp/tope de Lighter puesto), mientras que `/fundings` puede reflejar
+la prima cruda antes del clamp — y al mirar una muestra más amplia de símbolos, los
+valores variaban genuinamente de uno a otro (no eran todos la misma constante), lo que
+apoya que son datos reales por mercado y no un fallo compartido. Aun así, esto no se ha
+podido confirmar al 100% desde este entorno: **antes de operar con ellos, compara al
+menos una tasa de Lighter (ej. BTC) contra la propia interfaz oficial de Lighter.**
 
 ## Importante sobre dónde correr esto
 

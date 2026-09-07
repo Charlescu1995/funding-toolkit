@@ -25,9 +25,11 @@ Estos 4 conectores se construyeron a partir de la documentación pública de cad
 tiene salida a PyPI). Antes de fiarte de sus números al 100%, comprueba en el
 despliegue real:
 
-- **Intervalo de funding**: Lighter/Extended/Pacifica = 1h, Paradex = 8h (documentado
-  explícitamente). Si el APR de alguno sale desproporcionado (ej. x8 de más o de
-  menos), revisa `INTERVAL_HOURS` en `connectors/dex_<nombre>.py`.
+- **Intervalo de funding**: Extended/Pacifica = 1h, Paradex/Lighter = 8h (Lighter
+  liquida cada hora, pero el `rate` que da su API está normalizado a 8h — ver más
+  abajo). Si el APR de alguno sale desproporcionado (ej. x8 de más o de menos),
+  revisa `INTERVAL_HOURS` en `connectors/dex_<nombre>.py` — Extended y Pacifica
+  siguen sin contrastar en vivo, así que no se puede descartar el mismo problema ahí.
 - **Unidades del Open Interest**: Extended da el OI ya en USD directamente
   (`openInterest`, distinto de `openInterestBase`). Lighter, Paradex y Pacifica NO
   documentan explícitamente la unidad de su campo de OI — se asumió que es en
@@ -55,17 +57,19 @@ inflaba el ranking. **Ya está corregido**: ahora el conector es estricto, solo 
 queda con la fila cuyo `exchange` sea exactamente `"lighter"`, y descarta el mercado
 si esa fila no existe (verificado con un test que reproduce el escenario exacto).
 
-Aparte del bug, quedaba una duda sobre si los valores de Lighter que SÍ pasan el
-filtro están en la escala correcta: al comparar `/funding-rates` (tasa "actual") con
-`/fundings` (histórico de eventos de funding ya liquidados) para BTC, salían números
-distintos. La hipótesis más probable, respaldada por campos `funding_clamp_small` /
-`funding_clamp_big` que trae la API, es que `/funding-rates` enseña la tasa YA
-aplicada (con el clamp/tope de Lighter puesto), mientras que `/fundings` puede reflejar
-la prima cruda antes del clamp — y al mirar una muestra más amplia de símbolos, los
-valores variaban genuinamente de uno a otro (no eran todos la misma constante), lo que
-apoya que son datos reales por mercado y no un fallo compartido. Aun así, esto no se ha
-podido confirmar al 100% desde este entorno: **antes de operar con ellos, compara al
-menos una tasa de Lighter (ej. BTC) contra la propia interfaz oficial de Lighter.**
+#### Segundo bug encontrado y corregido: el `rate` de Lighter no es por hora, es por 8h
+
+Tras corregir el bug anterior, BTC en Lighter seguía saliendo con un APR de 84.1% en
+el ranking — desproporcionado. Comparando directamente con la interfaz oficial de
+Lighter (captura del usuario: "1HR FUNDING: +0.0012%" para BTC) contra lo que devolvía
+`/funding-rates` para ese mismo mercado (0.0096%), la diferencia era de exactamente 8
+veces. Es decir: aunque Lighter liquida el funding cada hora, el campo `rate` de este
+endpoint de comparación viene normalizado a un equivalente de 8h, no a la tasa horaria
+real — tiene sentido, ya que ese mismo endpoint compara Lighter contra otros exchanges
+que liquidan con otra frecuencia, así que normalizan todos a un periodo común para
+poder comparar. El conector tenía `INTERVAL_HOURS = 1`, lo que multiplicaba el APR por
+8 de más. **Ya está corregido**: ahora usa `INTERVAL_HOURS = 8`, y el APR de BTC en
+Lighter pasa de 84.1% a los ~10.5% que coinciden con la interfaz oficial.
 
 ## Importante sobre dónde correr esto
 

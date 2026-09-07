@@ -27,6 +27,15 @@ Por eso este conector es estricto: solo se queda con la fila cuyo `exchange`
 sea exactamente "lighter"; si un mercado no tiene esa fila, se descarta en
 vez de arriesgarse a etiquetar la tasa de otro exchange como si fuera propia
 de Lighter (bug real, encontrado y corregido tras probar contra la API en vivo).
+
+Nota sobre el periodo del `rate`: aunque Lighter liquida el funding cada
+hora, el valor que devuelve /funding-rates está normalizado a un
+equivalente de 8h, no a 1h (tiene sentido: es un endpoint de comparación
+entre varios exchanges con distinta frecuencia de liquidación, así que los
+normalizan a un periodo común). Verificado en vivo contra la propia UI de
+Lighter: para BTC la UI mostraba "1HR FUNDING: +0.0012%" mientras que
+/funding-rates devolvía 0.0096% — exactamente 8 veces más. Ver
+INTERVAL_HOURS más abajo.
 """
 
 from __future__ import annotations
@@ -43,8 +52,18 @@ BASE_URL = "https://mainnet.zklighter.elliot.ai"
 FUNDING_RATES_URL = f"{BASE_URL}/api/v1/funding-rates"
 ORDER_BOOK_DETAILS_URL = f"{BASE_URL}/api/v1/orderBookDetails"
 
-# Lighter liquida funding cada hora (documentado en docs.lighter.xyz/trading/funding).
-INTERVAL_HOURS = 1
+# OJO: Lighter LIQUIDA el funding cada hora, pero el campo `rate` que devuelve
+# /funding-rates NO es la tasa por hora — es la tasa normalizada a un
+# equivalente de 8h. Tiene sentido porque este endpoint compara varios
+# exchanges a la vez (binance, bybit, hyperliquid, lighter) y cada uno
+# liquida con su propia frecuencia, así que normalizan todos a un periodo
+# común para poder comparar. Verificado en vivo comparando contra la propia
+# interfaz de Lighter: la UI mostraba "1HR FUNDING: +0.0012%" para BTC,
+# mientras que /funding-rates devolvía 0.0096% (exactamente 8 veces más) —
+# si se tratara ese 0.0096% como tasa de 1h (como hacía la versión anterior
+# de este conector) el APR salía en 84.1% en vez del 10.5% real. Por eso
+# INTERVAL_HOURS = 8 aquí, aunque la liquidación real sea cada hora.
+INTERVAL_HOURS = 8
 
 
 class LighterConnector:

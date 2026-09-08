@@ -8,7 +8,7 @@ ProFunding, Loris Tools y el selector delta-neutral de John5Cripto.
 Vamos construyéndola paso a paso. Progreso:
 
 - [x] Paso 1 — Arquitectura del proyecto y modelo de datos común
-- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 5 DEX vía API directa (Hyperliquid, Lighter, Paradex, Extended, Pacifica)
+- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 8 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX y GRVT vía API directa/ccxt)
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
 - [x] Paso 5 — Consistency Score y OI Depth (con fallback contratos×mark_price para exchanges que no dan el USD directo)
@@ -70,6 +70,32 @@ que liquidan con otra frecuencia, así que normalizan todos a un periodo común 
 poder comparar. El conector tenía `INTERVAL_HOURS = 1`, lo que multiplicaba el APR por
 8 de más. **Ya está corregido**: ahora usa `INTERVAL_HOURS = 8`, y el APR de BTC en
 Lighter pasa de 84.1% a los ~10.5% que coinciden con la interfaz oficial.
+
+### DEX nuevos, segunda tanda (Aster, edgeX, GRVT)
+
+Se eligieron mirando el ranking real de DEX de perpetuos por volumen/OI (no de memoria
+— se consultó DefiLlama en vivo): tras Hyperliquid, Aster es el #2 mundial, edgeX y GRVT
+están también en el top de los que faltaban por cubrir. Los tres tienen forma muy distinta
+entre sí:
+
+- **Aster**: no se escribió conector propio — ya está bien soportado por ccxt (se
+  comprobó leyendo el código fuente de ccxt, no solo la bandera de capacidad), así que
+  se reutiliza el mismo `CexConnector` genérico que usan los CEX, solo que declarado con
+  `venue_type=DEX`. Es el más fiable de los tres nuevos, mismo nivel de confianza que
+  cualquier CEX de la lista.
+- **edgeX**: conector propio, pero de los más sencillos — un único endpoint bulk
+  (`getTicker` sin `contractId`) trae funding rate, mark price y OI de todos los
+  contratos de golpe. El intervalo de liquidación sí varía por contrato (a diferencia de
+  Extended/Pacifica), así que se cruza con una segunda llamada a metadata.
+- **GRVT**: el más delicado de los tres. Su API de mercado NO tiene ningún endpoint
+  bulk — hay que pedir el ticker instrumento por instrumento, así que el conector lanza
+  las peticiones en paralelo (pool de hilos) en vez de secuencialmente, para no disparar
+  el tiempo de carga de la página. Es también el que más asunciones sin verificar
+  acumula: la escala de los precios (÷ 1e9), la unidad del funding rate ("centibeeps",
+  convertido asumiendo 1 centibeep = 1e-6) y el intervalo de liquidación (sin campo
+  fiable encontrado, se usa 8h por defecto). **Es el primer candidato a revisar en
+  cuanto tengas datos reales**, igual que hicimos con Lighter — compara al menos un
+  símbolo contra la interfaz oficial de GRVT.
 
 ## Importante sobre dónde correr esto
 

@@ -10,7 +10,10 @@ de una misma clase genérica como pasa con los CEX.
 
 from __future__ import annotations
 
+from .cex_ccxt import aster
+from .dex_edgex import edgex
 from .dex_extended import extended
+from .dex_grvt import grvt
 from .dex_hyperliquid import HyperliquidConnector
 from .dex_lighter import lighter
 from .dex_pacifica import pacifica
@@ -21,4 +24,13 @@ def hyperliquid() -> HyperliquidConnector:
     return HyperliquidConnector()
 
 
-ALL_DEX_FACTORIES = [hyperliquid, lighter, paradex, extended, pacifica]
+ALL_DEX_FACTORIES = [
+    hyperliquid,
+    lighter,
+    paradex,
+    extended,
+    pacifica,
+    aster,
+    edgex,
+    grvt,
+]

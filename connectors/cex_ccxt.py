@@ -36,26 +36,48 @@ DEFAULT_INTERVAL_HOURS = {
     "gate": 8,
     "mexc": 8,
     "htx": 8,
+    # Aster (ver aster() más abajo): arquitectura de DEX, pero ccxt ya lo
+    # soporta igual que un CEX (fetch_funding_rates() bulk funciona). 8h es
+    # el intervalo "clásico" tipo Binance — Aster expone `fundingIntervalHours`
+    # por símbolo en otro endpoint (no en el bulk que usamos aquí), así que
+    # esto es la misma simplificación que ya aplicamos al resto: partimos del
+    # valor por defecto del exchange, sin refinar por símbolo.
+    "aster": 8,
 }
 
 
 class CexConnector:
-    """Conector CEX genérico. Un objeto = un exchange de ccxt."""
+    """
+    Conector genérico basado en ccxt. Un objeto = un exchange de ccxt.
 
-    venue_type = VenueType.CEX
+    El nombre es CexConnector por herencia histórica (empezó siendo solo para
+    CEX), pero también sirve para DEX que ya están bien soportados por ccxt
+    (como Aster) — para esos casos se pasa `venue_type=VenueType.DEX` al
+    construirlo, en vez de escribir un conector propio desde cero como
+    hicimos con Lighter/Paradex/Extended/Pacifica/edgeX/GRVT.
+    """
 
-    def __init__(self, ccxt_id: str, quote: str = "USDT", limit: int | None = None):
+    def __init__(
+        self,
+        ccxt_id: str,
+        quote: str = "USDT",
+        limit: int | None = None,
+        venue_type: VenueType = VenueType.CEX,
+    ):
         """
-        ccxt_id: id de ccxt para el exchange, ej. "binanceusdm", "bybit".
-        quote:   moneda de cotización a la que restringimos los pares (evita
-                 mezclar USDT-margined con COIN-margined en el MVP).
-        limit:   número máximo de pares a traer (útil para pruebas rápidas;
-                 None = todos).
+        ccxt_id:    id de ccxt para el exchange, ej. "binanceusdm", "bybit", "aster".
+        quote:      moneda de cotización a la que restringimos los pares (evita
+                    mezclar USDT-margined con COIN-margined en el MVP).
+        limit:      número máximo de pares a traer (útil para pruebas rápidas;
+                    None = todos).
+        venue_type: CEX por defecto; DEX para exchanges como Aster que son
+                    arquitectura DEX pero ya están cubiertos por ccxt.
         """
         self.ccxt_id = ccxt_id
         self.name = ccxt_id
         self.quote = quote
         self.limit = limit
+        self.venue_type = venue_type
         self._client = getattr(ccxt, ccxt_id)({"enableRateLimit": True})
 
     def fetch_funding_rates(self) -> list[FundingRate]:
@@ -86,7 +108,7 @@ class CexConnector:
             out.append(
                 FundingRate(
                     exchange=self.ccxt_id,
-                    venue_type=VenueType.CEX,
+                    venue_type=self.venue_type,
                     symbol=base,
                     raw_symbol=market_symbol,
                     funding_rate=float(rate),
@@ -186,6 +208,16 @@ def mexc() -> CexConnector:
 
 def htx() -> CexConnector:
     return CexConnector("htx")
+
+
+def aster() -> CexConnector:
+    # Aster es arquitectónicamente un DEX (su propia "Aster Chain"), pero
+    # ccxt ya trae fetch_funding_rates() implementado de verdad para él —
+    # comprobado leyendo el código fuente de ccxt (no solo la bandera
+    # `has['fetchFundingRates']`, que a veces está mal declarada como en
+    # GRVT: ver connectors/dex_grvt.py). Por eso se declara venue_type=DEX
+    # aquí en vez de escribir un conector propio como con Lighter/Paradex/etc.
+    return CexConnector("aster", venue_type=VenueType.DEX)
 
 
 ALL_CEX_FACTORIES = [binance, bybit, okx, bitget, kucoin, gate, mexc, htx]

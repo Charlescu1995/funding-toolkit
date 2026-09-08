@@ -8,7 +8,7 @@ ProFunding, Loris Tools y el selector delta-neutral de John5Cripto.
 Vamos construyéndola paso a paso. Progreso:
 
 - [x] Paso 1 — Arquitectura del proyecto y modelo de datos común
-- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 8 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX y GRVT vía API directa/ccxt)
+- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 8 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX y GRVT vía API directa/ccxt) — los 8 DEX confirmados devolviendo datos reales en producción
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
 - [x] Paso 5 — Consistency Score y OI Depth (con fallback contratos×mark_price para exchanges que no dan el USD directo)
@@ -136,6 +136,15 @@ usando como valor por defecto pero ahora tiene respaldo directo en vez de ser so
 "el más común del sector". Sigue pendiente de confirmar contra la interfaz oficial de
 GRVT: la escala de precios (÷ 1e9) y la conversión de "centibeeps" — ver el docstring
 de `connectors/dex_grvt.py` para el detalle completo.
+
+**Cerrado**: en el despliegue siguiente a este último fix, GRVT pasó de 0 a **194
+pares** y ya no aparece en el banner de errores. Con esto los 8 DEX de esta segunda
+tanda (Aster, edgeX, GRVT) están devolviendo datos reales en producción — 11 exchanges
+en total funcionando, sumados a los CEX/DEX ya estables. Queda pendiente, sin urgencia,
+verificar al menos un símbolo de GRVT (ej. BTC) contra su interfaz oficial para
+confirmar la escala de precios y la conversión de funding rate — es el mismo tipo de
+comprobación que se hizo con Lighter, y sigue siendo el primer candidato a revisar si
+algún número de GRVT se ve desproporcionado en el ranking o la matriz.
 
 ## Importante sobre dónde correr esto
 

@@ -142,6 +142,15 @@ class GrvtConnector:
                         pass
                     break
 
+        if not instrument_names:
+            # No devolvemos silenciosamente [] — eso es indistinguible de
+            # "GRVT no tiene mercados" cuando lo real es que la forma de la
+            # respuesta cambió o el endpoint falló de otra manera.
+            raise RuntimeError(
+                "grvt: all_instruments no devolvió ningún instrumento — probablemente "
+                "cambió la forma de la respuesta (revisar contra la API en vivo)"
+            )
+
         out: list[FundingRate] = []
         errors: dict[str, str] = {}
 
@@ -198,7 +207,16 @@ class GrvtConnector:
                     )
                 )
 
-        if errors:
+        if not out:
+            # Igual que arriba: si TODOS los tickers fallaron o vinieron
+            # vacíos, no es lo mismo que "GRVT no tiene funding rates" — que
+            # suba el motivo real en vez de un "0 pares" mudo.
+            sample = dict(list(errors.items())[:3])
+            raise RuntimeError(
+                f"grvt: {len(errors)}/{len(instrument_names)} instrumentos fallaron y no "
+                f"quedó ningún par válido — muestra de errores: {sample}"
+            )
+        elif errors:
             logger.warning(
                 "grvt: %d/%d instrumentos fallaron al pedir su ticker (se omiten, no tiran el resto): %s",
                 len(errors),

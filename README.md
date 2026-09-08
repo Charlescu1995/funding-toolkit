@@ -97,6 +97,29 @@ entre sí:
   cuanto tengas datos reales**, igual que hicimos con Lighter — compara al menos un
   símbolo contra la interfaz oficial de GRVT.
 
+#### Bug real encontrado y corregido: edgeX daba 0 pares sin ningún error visible
+
+En el primer despliegue de esta segunda tanda, edgeX y GRVT salieron con 0 pares en el
+diagnóstico "pares traídos por exchange" — pero, a diferencia de binance/bybit/etc., NO
+aparecían en el banner de "Algunos exchanges no respondieron". Eso significa que no
+saltó ninguna excepción: el conector "funcionó" pero no encontró nada que devolver, lo
+cual es mucho más difícil de diagnosticar que un error explícito.
+
+Para edgeX se investigó pidiendo la API en vivo directamente (no solo la
+documentación): el endpoint bulk que usaba (`getTicker` sin `contractId`) devolvía
+`"data": []` de forma consistente, probado con distintos contratos. En cambio, el
+endpoint de funding por contrato (`getLatestFundingRate`) sí devolvió datos reales y
+completos. **Ya está corregido**: el conector ahora usa ese endpoint que se comprobó
+que funciona, uno por contrato en paralelo (como GRVT) — a cambio, ya no trae Open
+Interest, porque ese endpoint no lo incluye y no se encontró ninguna alternativa fiable
+para edgeX; el OI de edgeX sale como "s/d" hasta que se encuentre otra fuente.
+
+Además, ambos conectores (edgeX y GRVT) ahora lanzan un error explícito si TODOS sus
+contratos/instrumentos fallan en vez de devolver una lista vacía en silencio — así que
+si algo similar vuelve a pasar (por ejemplo con GRVT, que sigue sin verificar en vivo),
+el motivo real aparecerá en el banner de errores de la interfaz en vez de un "0 pares"
+mudo que hay que ir a investigar a ciegas.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

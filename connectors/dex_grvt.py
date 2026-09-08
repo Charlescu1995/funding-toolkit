@@ -60,6 +60,22 @@ cuanto lo tengas desplegado, igual que hicimos con Lighter:
     open_interest usa la MISMA escala (÷ 1e9) antes de multiplicar por el
     mark price — coherente mejor que sin escalar, pero sigue sin confirmarse
     contra la red real. Tercer y último candidato a revisar en vivo.
+
+Primer despliegue real de este conector (con el fail-loud ya puesto): dio
+"grvt: 0/194 instrumentos fallaron y no quedó ningún par válido — muestra de
+errores: {}" — es decir, CERO peticiones lanzaron excepción (todas las 194
+respondieron 200 OK), pero NINGUNA trajo un ticker reconocible. Eso descarta
+un problema de red/autenticación y apunta a un desajuste de forma: o bien el
+body `{"instrument": "<nombre>"}` no es el que espera `/full/v1/ticker`, o la
+respuesta no trae el resultado bajo la clave `"result"`, o no se llama
+`funding_rate_curr`. Como esta API es POST (WebFetch solo hace GET) y el
+sandbox de desarrollo no tiene salida a exchanges, no se ha podido confirmar
+cuál de las tres es. En vez de seguir adivinando a ciegas, el conector ahora
+guarda una muestra del JSON crudo de la respuesta cuando esto vuelve a pasar
+(ver `unparsed_samples` en `fetch_funding_rates`) y la mete en el mensaje de
+error — así el PRÓXIMO despliegue va a enseñar, directamente en el banner de
+la interfaz, la forma real de la respuesta de GRVT, sin necesitar otra ronda
+de "prueba y build".
 """
 
 from __future__ import annotations
@@ -102,18 +118,16 @@ class GrvtConnector:
         self._session = session or requests.Session()
         self._timeout = timeout
 
-    def _fetch_ticker(self, instrument: str) -> dict | None:
+    def _fetch_ticker_raw(self, instrument: str) -> dict:
+        # Devuelve el payload de la petición TAL CUAL, sin recortar a
+        # "result" — ver comentario en fetch_funding_rates() sobre por qué
+        # esto ahora importa: si la forma real no es la esperada, necesitamos
+        # poder enseñar el JSON crudo en el error, no solo silenciarlo.
         resp = self._session.post(
             TICKER_URL, json={"instrument": instrument}, timeout=self._timeout
         )
         resp.raise_for_status()
-        payload = resp.json()
-        result = payload.get("result")
-        # La API puede devolver el resultado como dict directo o como lista
-        # de un elemento según el endpoint/versión — cubrimos ambos casos.
-        if isinstance(result, list):
-            return result[0] if result else None
-        return result
+        return resp.json()
 
     def fetch_funding_rates(self) -> list[FundingRate]:
         instruments_resp = self._session.post(
@@ -153,24 +167,50 @@ class GrvtConnector:
 
         out: list[FundingRate] = []
         errors: dict[str, str] = {}
+        # Instrumentos donde la petición SÍ respondió 200 sin lanzar excepción,
+        # pero no encontramos dentro datos que sepamos interpretar (el campo
+        # "result" no está donde lo esperábamos, o falta "funding_rate_curr").
+        # Antes esto se descartaba con un simple `continue`, indistinguible de
+        # "este instrumento no tiene datos" — pero si TODOS los instrumentos
+        # caen aquí a la vez, lo real es que la forma de la respuesta no es la
+        # que asumimos, y sin ver el JSON crudo no hay forma de saber por qué
+        # desde aquí (esta API es POST y no se puede probar ni con WebFetch ni
+        # desde este sandbox). Guardamos una muestra del payload crudo para
+        # poder enseñarlo en el error si hace falta.
+        unparsed_samples: dict[str, object] = {}
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             future_to_name = {
-                pool.submit(self._fetch_ticker, name): name for name in instrument_names
+                pool.submit(self._fetch_ticker_raw, name): name for name in instrument_names
             }
             for future in as_completed(future_to_name):
                 name = future_to_name[future]
                 try:
-                    ticker = future.result()
+                    payload = future.result()
                 except Exception as exc:  # noqa: BLE001 — un instrumento suelto no debe tirar todo el conector
                     errors[name] = f"{type(exc).__name__}: {exc}"
                     continue
 
+                result = payload.get("result") if isinstance(payload, dict) else None
+                # La API puede devolver el resultado como dict directo o como
+                # lista de un elemento según el endpoint/versión — cubrimos
+                # ambos casos.
+                ticker = result[0] if isinstance(result, list) and result else (
+                    result if isinstance(result, dict) else None
+                )
+
                 if not ticker:
+                    if len(unparsed_samples) < 3:
+                        unparsed_samples[name] = payload
                     continue
 
                 rate_raw = ticker.get("funding_rate_curr")
                 if rate_raw is None:
+                    if len(unparsed_samples) < 3:
+                        # Aquí sí encontramos un "ticker", pero sin el campo
+                        # que esperábamos — guardamos las claves que SÍ trae,
+                        # más útil para diagnosticar que el payload entero.
+                        unparsed_samples[name] = {"claves_presentes": list(ticker.keys())}
                     continue
 
                 mark_price_raw = ticker.get("mark_price")
@@ -211,10 +251,29 @@ class GrvtConnector:
             # Igual que arriba: si TODOS los tickers fallaron o vinieron
             # vacíos, no es lo mismo que "GRVT no tiene funding rates" — que
             # suba el motivo real en vez de un "0 pares" mudo.
-            sample = dict(list(errors.items())[:3])
+            #
+            # Distinguimos dos causas posibles, porque son diagnósticos muy
+            # distintos: peticiones que lanzaron una excepción real (errors)
+            # frente a peticiones que respondieron 200 pero sin nada que
+            # sepamos interpretar (unparsed_samples) — este segundo caso, si
+            # afecta a TODOS los instrumentos a la vez como pasó en el primer
+            # despliegue de este fix (0 errores, 0 pares), apunta a que
+            # `TICKER_URL` responde con una forma distinta a la asumida
+            # (quizás el payload de la petición debería usar otra clave que
+            # "instrument", o el campo de respuesta no se llama "result"/
+            # "funding_rate_curr") — y esta muestra del JSON crudo es la
+            # única forma de verlo, ya que esta API no se puede probar ni con
+            # WebFetch (solo GET) ni desde este sandbox (sin salida a
+            # exchanges).
+            error_sample = dict(list(errors.items())[:3])
+            unparsed_sample = {
+                name: str(payload)[:400] for name, payload in unparsed_samples.items()
+            }
             raise RuntimeError(
-                f"grvt: {len(errors)}/{len(instrument_names)} instrumentos fallaron y no "
-                f"quedó ningún par válido — muestra de errores: {sample}"
+                f"grvt: 0 pares válidos de {len(instrument_names)} instrumentos — "
+                f"{len(errors)} peticiones fallaron con excepción (muestra: {error_sample}); "
+                f"el resto respondió sin lanzar error pero sin datos reconocibles "
+                f"(muestra de respuesta cruda, recortada a 400 car.: {unparsed_sample})"
             )
         elif errors:
             logger.warning(

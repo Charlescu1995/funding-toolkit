@@ -120,6 +120,20 @@ si algo similar vuelve a pasar (por ejemplo con GRVT, que sigue sin verificar en
 el motivo real aparecerá en el banner de errores de la interfaz en vez de un "0 pares"
 mudo que hay que ir a investigar a ciegas.
 
+**Confirmado en el redespliegue real tras este fix**: edgeX pasó de 0 a **169 pares**
+con datos normales — el cambio de endpoint funcionó. GRVT, en cambio, disparó el nuevo
+error explícito con un dato revelador: *"0/194 instrumentos fallaron"* — es decir,
+CERO peticiones dieron excepción (las 194 respondieron 200 OK), pero ninguna trajo un
+ticker reconocible. Eso descarta un problema de red y apunta a que la forma real de la
+respuesta de `/full/v1/ticker` no es la que se asumió (la clave raíz podría no ser
+`"result"`, o el campo del rate no llamarse `funding_rate_curr`, o el propio body de la
+petición `{"instrument": "..."}` no ser el que espera el endpoint). Como esta API es
+POST (WebFetch solo puede hacer GET) y el entorno de desarrollo no tiene salida a
+exchanges, no se ha podido confirmar cuál de las tres es. Se ha actualizado el conector
+para que, si esto vuelve a pasar, el error incluya una muestra del JSON crudo que
+devolvió GRVT — así el próximo despliegue va a enseñar la forma real de la respuesta
+directamente en el banner de la interfaz, sin necesitar otra ronda de build a ciegas.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

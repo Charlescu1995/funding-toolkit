@@ -64,18 +64,31 @@ cuanto lo tengas desplegado, igual que hicimos con Lighter:
 Primer despliegue real de este conector (con el fail-loud ya puesto): dio
 "grvt: 0/194 instrumentos fallaron y no quedó ningún par válido — muestra de
 errores: {}" — es decir, CERO peticiones lanzaron excepción (todas las 194
-respondieron 200 OK), pero NINGUNA trajo un ticker reconocible. Eso descarta
-un problema de red/autenticación y apunta a un desajuste de forma: o bien el
-body `{"instrument": "<nombre>"}` no es el que espera `/full/v1/ticker`, o la
-respuesta no trae el resultado bajo la clave `"result"`, o no se llama
-`funding_rate_curr`. Como esta API es POST (WebFetch solo hace GET) y el
-sandbox de desarrollo no tiene salida a exchanges, no se ha podido confirmar
-cuál de las tres es. En vez de seguir adivinando a ciegas, el conector ahora
-guarda una muestra del JSON crudo de la respuesta cuando esto vuelve a pasar
-(ver `unparsed_samples` en `fetch_funding_rates`) y la mete en el mensaje de
-error — así el PRÓXIMO despliegue va a enseñar, directamente en el banner de
-la interfaz, la forma real de la respuesta de GRVT, sin necesitar otra ronda
-de "prueba y build".
+respondieron 200 OK), pero NINGUNA trajo un ticker reconocible. Eso descartó
+un problema de red/autenticación y apuntó a un desajuste de forma. Se añadió
+un segundo nivel de diagnóstico (`unparsed_samples`) que, en el SIGUIENTE
+despliegue, reveló la causa exacta sin necesitar otra ronda de "prueba y
+build": la clave `"result"` SÍ es correcta y el ticker SÍ trae datos, pero el
+campo del funding rate no se llama `funding_rate_curr` como decía el SDK/doc
+— se llama **`funding_rate_8h_curr`** (junto a `funding_rate_8h_avg`). Claves
+completas vistas en vivo en el ticker: `event_time, instrument, mark_price,
+index_price, last_price, last_size, mid_price, best_bid_price,
+best_bid_size, best_ask_price, best_ask_size, funding_rate_8h_curr,
+funding_rate_8h_avg, interest_rate, forward_price, buy_volume_24h_b,
+sell_volume_24h_b, buy_volume_24h_q, sell_volume_24h_q, high_price,
+low_price, open_price, open_i(nterest, truncado en el log)`. **Ya
+corregido**: el conector ahora lee `funding_rate_8h_curr` (con
+`funding_rate_curr` como segundo intento por compatibilidad). De paso, el
+propio nombre del campo confirma algo que antes era una suposición: el
+intervalo de liquidación de GRVT es de 8h — coincide con el `FALLBACK_INTERVAL_HOURS`
+que ya se estaba usando, así que no hace falta tocarlo, pero ahora ese valor
+tiene respaldo directo en vez de ser solo "el más común del sector".
+
+Lo que SIGUE sin confirmarse, y es lo primero a comparar contra la interfaz
+oficial de GRVT en cuanto el conector devuelva números: la escala de precios
+(÷ 1e9) y la conversión de "centibeeps" (÷ 1e6) — ver puntos más arriba en
+este docstring, siguen siendo deducciones sin un ejemplo numérico oficial
+confirmado.
 """
 
 from __future__ import annotations
@@ -204,7 +217,13 @@ class GrvtConnector:
                         unparsed_samples[name] = payload
                     continue
 
-                rate_raw = ticker.get("funding_rate_curr")
+                # Ver docstring del módulo: el primer despliegue con diagnóstico
+                # reveló que el campo real NO es "funding_rate_curr" (lo que
+                # decía la documentación/SDK), sino "funding_rate_8h_curr" — se
+                # deja "funding_rate_curr" como segundo intento por si algún
+                # instrumento lo trae con el nombre antiguo, pero el real es
+                # el primero.
+                rate_raw = ticker.get("funding_rate_8h_curr", ticker.get("funding_rate_curr"))
                 if rate_raw is None:
                     if len(unparsed_samples) < 3:
                         # Aquí sí encontramos un "ticker", pero sin el campo

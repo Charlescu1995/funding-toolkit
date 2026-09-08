@@ -124,15 +124,18 @@ mudo que hay que ir a investigar a ciegas.
 con datos normales — el cambio de endpoint funcionó. GRVT, en cambio, disparó el nuevo
 error explícito con un dato revelador: *"0/194 instrumentos fallaron"* — es decir,
 CERO peticiones dieron excepción (las 194 respondieron 200 OK), pero ninguna trajo un
-ticker reconocible. Eso descarta un problema de red y apunta a que la forma real de la
-respuesta de `/full/v1/ticker` no es la que se asumió (la clave raíz podría no ser
-`"result"`, o el campo del rate no llamarse `funding_rate_curr`, o el propio body de la
-petición `{"instrument": "..."}` no ser el que espera el endpoint). Como esta API es
-POST (WebFetch solo puede hacer GET) y el entorno de desarrollo no tiene salida a
-exchanges, no se ha podido confirmar cuál de las tres es. Se ha actualizado el conector
-para que, si esto vuelve a pasar, el error incluya una muestra del JSON crudo que
-devolvió GRVT — así el próximo despliegue va a enseñar la forma real de la respuesta
-directamente en el banner de la interfaz, sin necesitar otra ronda de build a ciegas.
+ticker reconocible. Se añadió un segundo nivel de diagnóstico (muestra del JSON crudo
+en el propio mensaje de error) y, en el despliegue siguiente, ese diagnóstico reveló
+la causa exacta sin necesitar otra ronda de build a ciegas: la clave `"result"` sí es
+correcta y el ticker sí trae datos, pero el campo del funding rate no se llama
+`funding_rate_curr` (lo que decía el SDK oficial) sino **`funding_rate_8h_curr`**.
+**Ya corregido** — el conector ahora lee ese campo (con el nombre antiguo como
+segundo intento por compatibilidad). Como beneficio colateral, el propio nombre del
+campo confirma que el intervalo de liquidación de GRVT es de 8h, lo que ya se estaba
+usando como valor por defecto pero ahora tiene respaldo directo en vez de ser solo
+"el más común del sector". Sigue pendiente de confirmar contra la interfaz oficial de
+GRVT: la escala de precios (÷ 1e9) y la conversión de "centibeeps" — ver el docstring
+de `connectors/dex_grvt.py` para el detalle completo.
 
 ## Importante sobre dónde correr esto
 

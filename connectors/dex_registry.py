@@ -18,6 +18,8 @@ from .dex_hyperliquid import HyperliquidConnector
 from .dex_lighter import lighter
 from .dex_pacifica import pacifica
 from .dex_paradex import paradex
+from .dex_risex import risex
+from .dex_variational import variational
 
 
 def hyperliquid() -> HyperliquidConnector:
@@ -33,4 +35,6 @@ ALL_DEX_FACTORIES = [
     aster,
     edgex,
     grvt,
+    variational,
+    risex,
 ]

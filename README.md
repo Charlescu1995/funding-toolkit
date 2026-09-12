@@ -8,7 +8,7 @@ ProFunding, Loris Tools y el selector delta-neutral de John5Cripto.
 Vamos construyéndola paso a paso. Progreso:
 
 - [x] Paso 1 — Arquitectura del proyecto y modelo de datos común
-- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 8 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX y GRVT vía API directa/ccxt) — los 8 DEX confirmados devolviendo datos reales en producción
+- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 10 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational y RiseX vía API directa/ccxt) — los primeros 8 DEX confirmados devolviendo datos reales en producción; Variational y RiseX son los dos más recientes, aún sin contrastar contra un despliegue real (ver más abajo)
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
 - [x] Paso 5 — Consistency Score y OI Depth (con fallback contratos×mark_price para exchanges que no dan el USD directo)
@@ -145,6 +145,67 @@ verificar al menos un símbolo de GRVT (ej. BTC) contra su interfaz oficial para
 confirmar la escala de precios y la conversión de funding rate — es el mismo tipo de
 comprobación que se hizo con Lighter, y sigue siendo el primer candidato a revisar si
 algún número de GRVT se ve desproporcionado en el ranking o la matriz.
+
+### DEX nuevos, tercera tanda (Variational, RiseX) — pendientes de verificar en vivo
+
+Estos dos, a diferencia de la segunda tanda (Aster/edgeX/GRVT), se construyeron sin
+poder probar el redespliegue real todavía en el momento de escribir esto — todo lo de
+abajo está respaldado por datos en vivo (se pudo llamar a las APIs públicas de ambos
+directamente desde este entorno vía fetch HTTP, aunque no hay conexión de red directa
+normal), pero sin el contraste final contra la interfaz oficial de cada exchange que sí
+se pudo hacer con Lighter y GRVT. Ambos son, en diseño, los conectores más simples de
+todo el proyecto: un único endpoint bulk trae funding rate + mark price + open interest
+de todos los mercados de golpe — sin pool de hilos, sin llamada aparte a metadata.
+
+- **Variational**: DEX omnichain (RFQ + AMM híbrido). Un solo endpoint público,
+  `GET /metadata/stats`, trae todo. Aquí apareció la asunción más importante de esta
+  tanda: el campo `funding_rate` de cada mercado **no es la tasa cruda del intervalo,
+  sino que todo apunta a que ya viene anualizada (APY)** — los valores en vivo
+  observados (ej. REZ en -1.333404 sobre un intervalo de 4h) serían tasas del ±133% cada
+  4 horas si se tomaran literalmente, algo imposible dado el límite de funding del
+  2%/hora que documenta el propio exchange, pero encajan perfectamente como APY. Se
+  contrastó además contra cómo muestra estas mismas tasas `loris.tools` (uno de los dos
+  trackers en los que se inspira este proyecto) y la conclusión fue consistente. Por
+  eso el conector "desanualiza" el APY a una tasa por intervalo antes de guardarlo — si
+  no lo hiciera, `core/normalize.py` volvería a anualizar algo que ya estaba anualizado
+  y los APR de Variational saldrían disparatadamente altos. Ver el docstring de
+  `connectors/dex_variational.py` para el detalle completo del razonamiento.
+- **RiseX**: DEX sobre RISE Chain. Un solo endpoint, `GET /v1/markets` contra
+  `https://api.rise.trade`, con el diseño más limpio de todos: el propio endpoint da el
+  intervalo de liquidación explícito en nanosegundos (`funding_interval`), así que no
+  hace falta ninguna adivinanza de intervalo como sí hizo falta con GRVT o Lighter en su
+  momento. Cuesta encontrar la URL correcta porque RiseX reparte su documentación en dos
+  dominios distintos (`docs.risechain.com`, conceptual, y `developer.rise.trade`, la
+  referencia real de API) — se usó la segunda. No se logró un fetch en vivo con datos
+  reales de `/v1/markets` esta sesión (solo el ejemplo de su spec OpenAPI), así que el
+  conector se apoya en lo documentado, no en datos contrastados como Variational.
+
+**Asunciones sin verificar, a revisar en cuanto haya un despliegue real** (mismo
+espíritu que se hizo con Lighter/GRVT — comparar al menos un símbolo, idealmente BTC,
+contra la interfaz oficial de cada exchange):
+
+- **Variational — Open Interest**: se comprobaron en vivo BTC (mark_price ≈ 77,396,
+  `long_open_interest` ≈ 80.66M) y PEOPLE (mark_price ≈ 0.008, `long_open_interest` ≈
+  3,697). 80.66 millones de BTC de open interest es físicamente imposible (el supply
+  total de BTC ronda los 19.5M), así que se descartó la lectura literal "unidades del
+  activo base" y se asumió que el campo ya viene en USD (igual que `openInterest` en
+  Extended) — se usa directamente, sin multiplicar por mark price. Si el OI de
+  Variational sale desproporcionadamente bajo en el ranking, esta es la primera
+  sospechosa.
+- **RiseX — Open Interest**: a diferencia de Variational, aquí la ambigüedad es de la
+  propia documentación (no hay evidencia en ningún sentido) — la spec documenta "18
+  decimales" para los campos de funding pero no dice nada sobre la escala o
+  denominación de `open_interest` ni `mark_price`. Se aplicó la asunción por defecto
+  usada para Hyperliquid/Lighter/Paradex/Pacifica: unidades del activo base,
+  convertidas a USD multiplicando por mark price. Si resulta que RiseX en realidad ya
+  da el OI en USD (como Extended o Variational), el OI de RiseX saldría duplicado por
+  error — primera cosa a comprobar.
+- **RiseX — escala de `current_funding_rate`**: la documentación dice "decimal string,
+  18 decimales", interpretado aquí como "hasta 18 decimales de precisión en el string"
+  (no como un entero de punto fijo que haya que dividir entre 1e18), en base a que el
+  propio ejemplo de la spec ya es una fracción decimal legible. Sin contrastar contra
+  una respuesta real todavía — si el APR de RiseX sale con un orden de magnitud
+  absurdo, esto es lo primero a revisar.
 
 ## Importante sobre dónde correr esto
 

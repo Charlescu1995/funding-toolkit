@@ -7,6 +7,23 @@ Es el diseño más simple de todos los DEX de este proyecto — ni thread pool
 (como GRVT/edgeX) ni fallback de intervalo por adivinanza (como Lighter): el
 propio endpoint trae el intervalo explícito en nanosegundos.
 
+--- Bug real encontrado y corregido: 'str' object has no attribute 'get' ---
+
+En el primer despliegue real, risex tiraba con
+`AttributeError: 'str' object has no attribute 'get'` al iterar `rows`. La
+causa: el conector asumía que `payload["markets"]` (o `["data"]`) es una
+LISTA de objetos de mercado, tal como lo documenta el ejemplo del OpenAPI
+spec — pero la respuesta real envuelve los mercados en un DICCIONARIO
+indexado por `market_id` (`{"markets": {"1": {...}, "2": {...}, ...}}`), no
+en un array. Al hacer `for row in rows` sobre ese diccionario, Python itera
+sus CLAVES (los market_id, strings) en vez de sus valores — de ahí que
+`row` fuera un string y `row.get(...)` explotara. **Ya corregido**: ahora se
+detecta si el contenedor de mercados es un `dict` y, en ese caso, se itera
+sobre `.values()` en vez de sobre el propio diccionario; además cada fila se
+comprueba con `isinstance(row, dict)` antes de tocarla, así que si en el
+futuro aparece otra forma inesperada, esa fila concreta se salta (se cuenta
+en `skipped`) en vez de tirar todo el conector.
+
 --- Nota sobre las dos webs de documentación ---
 
 RiseX tiene documentación repartida en dos dominios distintos:
@@ -110,13 +127,24 @@ class RiseXConnector:
         payload = resp.json()
 
         # La spec documenta la respuesta como un array de mercados en la
-        # raíz, pero por si acaso viene envuelta en {"data": [...]} o
-        # {"markets": [...]} (patrón visto en otros DEX de este proyecto),
-        # se comprueban ambas formas.
-        if isinstance(payload, list):
-            rows = payload
-        elif isinstance(payload, dict):
-            rows = payload.get("markets") or payload.get("data") or []
+        # raíz, pero la API real envuelve los mercados en {"markets": ...} o
+        # {"data": ...} — y ese contenedor, comprobado en producción, es un
+        # DICCIONARIO indexado por market_id, no una lista (ver docstring:
+        # "Bug real encontrado y corregido"). Se admite cualquiera de las
+        # tres formas: lista en la raíz, dict en la raíz, o dict/lista
+        # dentro de "markets"/"data".
+        container = payload
+        if isinstance(payload, dict):
+            container = payload.get("markets")
+            if container is None:
+                container = payload.get("data")
+            if container is None:
+                container = payload
+
+        if isinstance(container, dict):
+            rows = list(container.values())
+        elif isinstance(container, list):
+            rows = container
         else:
             rows = []
 
@@ -130,6 +158,10 @@ class RiseXConnector:
         skipped: dict[str, str] = {}
 
         for row in rows:
+            if not isinstance(row, dict):
+                skipped[str(row)] = "fila no es un objeto (formato inesperado)"
+                continue
+
             config = row.get("config") or {}
             raw_symbol = (
                 row.get("display_name")

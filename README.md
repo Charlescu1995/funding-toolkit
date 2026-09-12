@@ -8,7 +8,7 @@ ProFunding, Loris Tools y el selector delta-neutral de John5Cripto.
 Vamos construyéndola paso a paso. Progreso:
 
 - [x] Paso 1 — Arquitectura del proyecto y modelo de datos común
-- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 10 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational y RiseX vía API directa/ccxt) — los primeros 8 DEX confirmados devolviendo datos reales en producción; Variational y RiseX son los dos más recientes, aún sin contrastar contra un despliegue real (ver más abajo)
+- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 10 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational y RiseX vía API directa/ccxt) — 9 de los 10 DEX confirmados devolviendo datos reales en producción (Variational: 547 pares); RiseX tuvo un bug real en el primer despliegue (ya corregido, ver más abajo), pendiente de confirmar en el próximo reboot
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
 - [x] Paso 5 — Consistency Score y OI Depth (con fallback contratos×mark_price para exchanges que no dan el USD directo)
@@ -146,16 +146,11 @@ confirmar la escala de precios y la conversión de funding rate — es el mismo 
 comprobación que se hizo con Lighter, y sigue siendo el primer candidato a revisar si
 algún número de GRVT se ve desproporcionado en el ranking o la matriz.
 
-### DEX nuevos, tercera tanda (Variational, RiseX) — pendientes de verificar en vivo
+### DEX nuevos, tercera tanda (Variational, RiseX)
 
-Estos dos, a diferencia de la segunda tanda (Aster/edgeX/GRVT), se construyeron sin
-poder probar el redespliegue real todavía en el momento de escribir esto — todo lo de
-abajo está respaldado por datos en vivo (se pudo llamar a las APIs públicas de ambos
-directamente desde este entorno vía fetch HTTP, aunque no hay conexión de red directa
-normal), pero sin el contraste final contra la interfaz oficial de cada exchange que sí
-se pudo hacer con Lighter y GRVT. Ambos son, en diseño, los conectores más simples de
-todo el proyecto: un único endpoint bulk trae funding rate + mark price + open interest
-de todos los mercados de golpe — sin pool de hilos, sin llamada aparte a metadata.
+Ambos son, en diseño, los conectores más simples de todo el proyecto: un único
+endpoint bulk trae funding rate + mark price + open interest de todos los mercados de
+golpe — sin pool de hilos, sin llamada aparte a metadata.
 
 - **Variational**: DEX omnichain (RFQ + AMM híbrido). Un solo endpoint público,
   `GET /metadata/stats`, trae todo. Aquí apareció la asunción más importante de esta
@@ -179,6 +174,38 @@ de todos los mercados de golpe — sin pool de hilos, sin llamada aparte a metad
   referencia real de API) — se usó la segunda. No se logró un fetch en vivo con datos
   reales de `/v1/markets` esta sesión (solo el ejemplo de su spec OpenAPI), así que el
   conector se apoya en lo documentado, no en datos contrastados como Variational.
+
+#### Bug real encontrado y corregido: risex tiraba `'str' object has no attribute 'get'`
+
+En el primer despliegue real, apenas se subió el zip, el diagnóstico "pares traídos por
+exchange" seguía sin mostrar ni `variational` ni `risex` — ni un dato, ni un error, nada
+— a pesar de que el repo de GitHub ya tenía el código correcto. La causa no era del
+código: Streamlit Cloud había hecho `git pull` pero no había reiniciado de verdad el
+proceso de Python, así que seguía sirviendo los módulos viejos desde memoria (mismo tipo
+de desajuste "código en disco ≠ código corriendo" que ya se había visto antes con otros
+despliegues). Un **Reboot app** manual desde el panel de Streamlit Cloud lo resolvió —
+tras eso sí aparecieron ambos en el diagnóstico, cada uno con su resultado real.
+
+**Variational salió redondo a la primera**: 547 pares con datos reales, sin errores. Solo
+6 tickers se saltaron (`USOILP`, `US500S`, `US100S`, `XAGS`, `XAUS`, `UKOILP` —
+productos sintéticos de materias primas/índices: petróleo, S&P 500, Nasdaq 100, plata,
+oro) por traer `funding_interval_s: 0`, algo que el conector detecta y descarta fila por
+fila sin tirar el resto — probablemente estos productos no liquidan funding de la forma
+habitual, no es un bug del conector.
+
+**RiseX sí tiró un error real**: `AttributeError: 'str' object has no attribute 'get'`.
+La causa: el conector asumía que `payload["markets"]` es una LISTA de mercados, tal como
+lo documenta el ejemplo del OpenAPI spec — pero la respuesta real de producción envuelve
+los mercados en un DICCIONARIO indexado por `market_id`
+(`{"markets": {"1": {...}, "2": {...}, ...}}`), no en un array. Al iterar ese
+diccionario con `for row in rows`, Python recorre sus CLAVES (los market_id, strings) en
+vez de sus valores — de ahí que `row` fuera un string y `row.get(...)` explotara.
+**Ya corregido**: el conector ahora distingue si el contenedor de mercados es un `dict`
+(itera sobre `.values()`) o una `list` (la usa tal cual), y además cada fila individual
+se comprueba con `isinstance(row, dict)` antes de tocarla — así que si vuelve a aparecer
+una forma inesperada, esa fila concreta se salta en vez de tirar todo el conector. Esta
+corrección va en este mismo zip, pendiente de confirmar en el redespliegue siguiente
+(con un nuevo Reboot, no solo un `git push`, visto lo anterior).
 
 **Asunciones sin verificar, a revisar en cuanto haya un despliegue real** (mismo
 espíritu que se hizo con Lighter/GRVT — comparar al menos un símbolo, idealmente BTC,

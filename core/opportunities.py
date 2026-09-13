@@ -183,6 +183,30 @@ def apply_oi_map(opportunities: list[OpportunityRow], oi_map: dict[OiTarget, flo
             opp.oi_bottleneck_side = "long" if opp.oi_long_usd <= opp.oi_short_usd else "short"
 
 
+def has_dead_liquidity(opp: OpportunityRow) -> bool:
+    """
+    True si una de las dos piernas tiene Open Interest CONFIRMADO en $0 —
+    no que no se haya podido consultar (eso es `None`, y se deja tal cual,
+    como "—" en la interfaz), sino que el propio exchange respondió que
+    ahora mismo no hay NINGUNA posición abierta en ese mercado.
+
+    Encontrado en producción (ver README, sección Aster/STORJ): algunos
+    exchanges (visto en Aster, vía ccxt) devuelven un funding rate normal
+    para un símbolo en su endpoint masivo de funding rates aunque ese
+    mercado no tenga ninguna actividad real — ni aparece en su propio
+    buscador ni en su listado oficial de símbolos operables. Solo se
+    descubre al pedir el Open Interest real de esa pierna en concreto
+    (lo que aquí solo se hace para el top N de oportunidades — ver
+    `collect_oi_targets`/`apply_oi_map`), que resulta ser exactamente $0.
+
+    Un mercado sin ninguna posición abierta no es una oportunidad
+    ejecutable por mucho que el spread de APR salga enorme — no hay nadie
+    al otro lado de la operación ahí. Se usa para sacar del ranking esas
+    filas "fantasma" en vez de dejar que parezcan la mejor oportunidad.
+    """
+    return opp.oi_long_usd == 0 or opp.oi_short_usd == 0
+
+
 def enrich_oi_depth(opportunities: list[OpportunityRow], top_n: int = 10) -> dict[OiTarget, str]:
     """
     Atajo sin caché: collect + fetch + apply en un solo paso. Pensado para el

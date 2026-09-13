@@ -296,6 +296,55 @@ el `interval_hours` se cancela) — así que el número que se ve en pantalla es
 `funding_interval_s`. El `interval_hours` sí importa para el resto de columnas
 derivadas (tasa cruda del intervalo, "cada 8h"), solo no para el APR anualizado.
 
+#### Bug real encontrado y corregido: Aster daba mercados "fantasma" (funding real, Open Interest $0)
+
+Ya con los 10 DEX en producción, apareció STORJ en el top del ranking como
+`Long en variational (-6078.9%) / Short en aster (+1.4%)`, con un spread de más de
+6000%. El usuario reportó que, al buscar "Storj" directamente en la web de Aster, no
+aparecía por ningún sitio.
+
+Investigación: se comprobaron en vivo los dos endpoints relevantes de Aster —
+`GET /fapi/v1/exchangeInfo` (el listado oficial de símbolos operables, lo que
+alimentaría su buscador: 76 símbolos, ninguno STORJ) y `GET /fapi/v3/premiumIndex`
+(el endpoint EXACTO que usa `fetch_funding_rates()` de ccxt para Aster — confirmado
+leyendo el propio código fuente de ccxt con `inspect.getsource`, no solo su
+documentación: 500 entradas, tampoco ninguna STORJ). Ninguno de los dos tenía rastro
+de STORJ en el momento de la comprobación, lo que en un primer momento dejó la duda
+como un posible problema de timing/caché en vez de un bug de verdad.
+
+La pista definitiva llegó de una fuente independiente: el usuario comprobó el mismo
+símbolo en **Loris Tools** (uno de los trackers en los que se inspira este proyecto)
+y su "Storj Exchange Breakdown" también lista a Aster — pero con **Open Interest
+$0.0** y Funding (8h)/(7d) en blanco ("—"). Que un tracker externo, que lee la API de
+Aster de forma completamente independiente de este proyecto, vea exactamente el mismo
+mercado "fantasma" confirma que no es un bug de parsing de este conector: Aster
+realmente tiene, en algún momento, un mercado STORJ presente en su superficie de API
+(funding rates y open interest por símbolo) sin que sea un mercado operable de verdad
+— no aparece en su listado oficial de símbolos ni en su buscador, y no tiene ninguna
+posición abierta.
+
+**La causa raíz**: el fetch masivo de funding rates (`/fapi/v3/premiumIndex`) le
+devuelve a ccxt una tasa numérica "normal" para STORJ aunque el mercado esté
+efectivamente muerto — probablemente un valor de relleno/última-tasa-conocida que
+Aster no limpia de ese endpoint aunque ya no sea operable. El propio conector
+(`connectors/cex_ccxt.py`) no tiene forma de distinguir esto de un mercado real solo
+con ese dato: hace falta el Open Interest real, que este proyecto solo pide para el
+top N de oportunidades (`OI_ENRICH_TOP_N = 10` en `pages/1_Funding_Rates.py`, vía
+`fetch_open_interest_usd`), y que para STORJ en Aster resultó ser exactamente `$0` —
+coincidiendo con lo que mostraba Loris.
+
+**La corrección**: en vez de intentar adivinar/filtrar símbolos "muertos" por nombre
+(fragil, y no ataja el problema en otros exchanges), se añadió
+`has_dead_liquidity()` en `core/opportunities.py`: cualquier oportunidad cuyo Open
+Interest YA CONFIRMADO (no `None` — eso sigue siendo "no consultado todavía", se deja
+tal cual como "—") sea exactamente `$0` en una de las dos piernas se saca del
+ranking antes de mostrarlo, con un aviso explicando por qué (`pages/1_Funding_Rates.py`,
+más un expander de diagnóstico igual que el de errores de OI). Un mercado sin ninguna
+posición abierta no es una operación ejecutable por mucho que el spread de APR salga
+enorme — no hay nadie al otro lado. Esto es genérico: protege contra este mismo patrón
+en cualquier exchange, no solo Aster, y solo actúa sobre dato confirmado, nunca sobre
+una ausencia de dato.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

@@ -23,6 +23,7 @@ from core.opportunities import (
     collect_oi_targets,
     compute_opportunities,
     fetch_oi_for_targets,
+    has_dead_liquidity,
 )
 
 # Cuántas oportunidades (de arriba del ranking) se enriquecen con OI Depth
@@ -192,6 +193,7 @@ st.divider()
 
 # ---------- Tabs: Ranking / Matriz / Histórico ----------
 oi_errors: dict[tuple[str, str], str] = {}  # se rellena en la pestaña Ranking, se enseña en Diagnóstico
+dead_liquidity: list = []  # idem — oportunidades descartadas por OI $0 confirmado (ver has_dead_liquidity)
 tab_ranking, tab_matrix, tab_history = st.tabs(["🏆 Ranking", "🔲 Matriz", "📈 Histórico"])
 
 with tab_ranking:
@@ -213,6 +215,28 @@ with tab_ranking:
         oi_targets = collect_oi_targets(opportunities, top_n=OI_ENRICH_TOP_N)
         oi_map, oi_errors = load_oi_map(oi_targets)
         apply_oi_map(opportunities, oi_map, top_n=OI_ENRICH_TOP_N)
+
+        # Ver core/opportunities.py::has_dead_liquidity — descubierto en
+        # producción con Aster/STORJ: un mercado con Open Interest $0
+        # confirmado no es una oportunidad ejecutable, aunque el spread de
+        # APR salga enorme. Se saca del ranking en vez de dejarlo arriba.
+        dead_liquidity = [o for o in opportunities if has_dead_liquidity(o)]
+        opportunities = [o for o in opportunities if not has_dead_liquidity(o)]
+
+        if dead_liquidity:
+            symbols_dead = ", ".join(sorted({o.symbol for o in dead_liquidity}))
+            st.caption(
+                f"⚠️ {len(dead_liquidity)} oportunidad(es) descartada(s) del ranking por Open "
+                f"Interest $0 confirmado en una de las dos piernas ({symbols_dead}) — el exchange "
+                "responde un funding rate pero no hay ninguna posición abierta ahí, así que no es "
+                "una operación ejecutable de verdad. Detalle en el diagnóstico de abajo."
+            )
+
+        if not opportunities:
+            st.info(
+                "Todas las oportunidades del top se descartaron por Open Interest $0 confirmado — "
+                "ver el aviso de arriba."
+            )
 
         df = pd.DataFrame(
             [
@@ -301,6 +325,25 @@ with tab_history:
 st.divider()
 with st.expander("Diagnóstico: pares traídos por exchange"):
     st.json(counts)
+
+if dead_liquidity:
+    with st.expander(f"Diagnóstico: {len(dead_liquidity)} oportunidad(es) descartada(s) por OI $0"):
+        st.caption(
+            "Ver core/opportunities.py::has_dead_liquidity. No es un fallo de conexión (eso "
+            "sale en 'OI Depth no disponible' de abajo) — es el exchange respondiendo que el "
+            "Open Interest real de esa pierna es exactamente $0."
+        )
+        st.json(
+            [
+                {
+                    "símbolo": o.symbol,
+                    "long": f"{o.long_exchange} (OI ${o.oi_long_usd:,.0f})",
+                    "short": f"{o.short_exchange} (OI ${o.oi_short_usd:,.0f})",
+                    "spread_apr_descartado": f"{o.spread_apr:.1f}%",
+                }
+                for o in dead_liquidity
+            ]
+        )
 
 if oi_errors:
     with st.expander(f"Diagnóstico: OI Depth no disponible para {len(oi_errors)} pierna(s) del top {OI_ENRICH_TOP_N}"):

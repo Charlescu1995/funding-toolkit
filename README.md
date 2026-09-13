@@ -193,46 +193,59 @@ oro) por traer `funding_interval_s: 0`, algo que el conector detecta y descarta 
 fila sin tirar el resto — probablemente estos productos no liquidan funding de la forma
 habitual, no es un bug del conector.
 
-**RiseX sí tiró un error real**: `AttributeError: 'str' object has no attribute 'get'`.
-La causa: el conector asumía que `payload["markets"]` es una LISTA de mercados, tal como
-lo documenta el ejemplo del OpenAPI spec — pero la respuesta real de producción envuelve
-los mercados en un DICCIONARIO indexado por `market_id`
-(`{"markets": {"1": {...}, "2": {...}, ...}}`), no en un array. Al iterar ese
-diccionario con `for row in rows`, Python recorre sus CLAVES (los market_id, strings) en
-vez de sus valores — de ahí que `row` fuera un string y `row.get(...)` explotara.
-**Ya corregido**: el conector ahora distingue si el contenedor de mercados es un `dict`
-(itera sobre `.values()`) o una `list` (la usa tal cual), y además cada fila individual
-se comprueba con `isinstance(row, dict)` antes de tocarla — así que si vuelve a aparecer
-una forma inesperada, esa fila concreta se salta en vez de tirar todo el conector. Esta
-corrección va en este mismo zip, pendiente de confirmar en el redespliegue siguiente
-(con un nuevo Reboot, no solo un `git push`, visto lo anterior).
+**RiseX tiró un error real, y en dos rondas.** Primera ronda:
+`AttributeError: 'str' object has no attribute 'get'`. La causa: el conector asumía
+que `payload["markets"]` es una LISTA de mercados, tal como lo documenta el ejemplo
+del OpenAPI spec — pero la respuesta real envuelve los mercados en un DICCIONARIO
+indexado por `market_id`, no en un array. Se corrigió para iterar `.values()` cuando
+el contenedor es un dict — pero esa corrección seguía asumiendo que la clave
+envolvente se llama `"markets"` o `"data"`.
 
-**Asunciones sin verificar, a revisar en cuanto haya un despliegue real** (mismo
-espíritu que se hizo con Lighter/GRVT — comparar al menos un símbolo, idealmente BTC,
-contra la interfaz oficial de cada exchange):
+Segunda ronda, con el fix anterior ya desplegado (y tras el `Reboot` manual, que
+también hizo falta esta vez): el error cambió a "2/2 mercados se saltaron", con el
+propio mensaje de error mostrando — de regalo — la lista completa de 32 mercados
+reales de RiseX aplastada en una sola entrada. Eso reveló la causa real: la respuesta
+NO usa ni `"markets"` ni `"data"` como nombre de clave en el nivel donde el conector
+las buscaba, así que caía a un último recurso (tratar el propio payload como el
+contenedor) que en realidad mezclaba la lista completa de mercados con un campo de
+timestamp suelto en un dict de solo un par de claves — de ahí que `.values()`
+devolviera "la lista entera" como una fila y "el timestamp" como otra, en vez de cada
+mercado por separado.
 
-- **Variational — Open Interest**: se comprobaron en vivo BTC (mark_price ≈ 77,396,
-  `long_open_interest` ≈ 80.66M) y PEOPLE (mark_price ≈ 0.008, `long_open_interest` ≈
-  3,697). 80.66 millones de BTC de open interest es físicamente imposible (el supply
-  total de BTC ronda los 19.5M), así que se descartó la lectura literal "unidades del
-  activo base" y se asumió que el campo ya viene en USD (igual que `openInterest` en
-  Extended) — se usa directamente, sin multiplicar por mark price. Si el OI de
-  Variational sale desproporcionadamente bajo en el ranking, esta es la primera
-  sospechosa.
-- **RiseX — Open Interest**: a diferencia de Variational, aquí la ambigüedad es de la
-  propia documentación (no hay evidencia en ningún sentido) — la spec documenta "18
-  decimales" para los campos de funding pero no dice nada sobre la escala o
-  denominación de `open_interest` ni `mark_price`. Se aplicó la asunción por defecto
-  usada para Hyperliquid/Lighter/Paradex/Pacifica: unidades del activo base,
-  convertidas a USD multiplicando por mark price. Si resulta que RiseX en realidad ya
-  da el OI en USD (como Extended o Variational), el OI de RiseX saldría duplicado por
-  error — primera cosa a comprobar.
-- **RiseX — escala de `current_funding_rate`**: la documentación dice "decimal string,
-  18 decimales", interpretado aquí como "hasta 18 decimales de precisión en el string"
-  (no como un entero de punto fijo que haya que dividir entre 1e18), en base a que el
-  propio ejemplo de la spec ya es una fracción decimal legible. Sin contrastar contra
-  una respuesta real todavía — si el APR de RiseX sale con un orden de magnitud
-  absurdo, esto es lo primero a revisar.
+**Ya corregido de raíz, cambiando de estrategia**: en vez de seguir adivinando el
+nombre de la clave envolvente (que ya ha fallado dos veces), el conector ahora busca
+la lista de mercados **por forma**: recorre el payload buscando la primera lista de
+objetos que "parecen" un mercado (tienen `market_id` o `current_funding_rate`), o un
+diccionario cuyos valores todos lo parecen — mirando tanto en el nivel raíz como un
+nivel de anidación dentro de cada valor. Esto es agnóstico al nombre exacto de la
+clave, así que sobrevive a que RiseX vuelva a cambiarla sin aviso.
+
+El propio error de la segunda ronda, al traer datos reales, permitió confirmar de
+golpe varias cosas que antes eran solo asunciones sin verificar:
+
+- **`current_funding_rate` SÍ es una fracción decimal directamente utilizable** — BTC
+  traía `"0.000004358528047845"` con intervalo de 1h, lo que da un APR ≈ 3.8%, una
+  cifra normal. Confirmado: NO hay que dividir entre 1e18.
+- **`open_interest` SÍ está en unidades del activo base**, no en USD — BTC traía
+  `open_interest: "142.86417"` con `mark_price ≈ 77,047`; en USD directo serían solo
+  ~$142 de OI (absurdo para BTC en un DEX con millones de volumen diario), mientras
+  que 142.86 BTC × mark price ≈ $11.0M es una cifra realista. Confirmada la asunción
+  que ya se venía usando.
+- **`base_asset_symbol` NO viene limpio** — viene con el par completo pegado, ej.
+  `"BTC/USDC"` en vez de `"BTC"`. Esto no se había anticipado (el ejemplo de la spec sí
+  mostraba "BTC" limpio) y habría roto el cruce de símbolos con el resto de exchanges.
+  **Ya corregido**: se recorta usando `quote_asset_symbol` con precisión.
+- **Hay mercados inactivos mezclados con los activos en la misma respuesta** — un
+  "DOGE/USDC" viejo marcado `[deprecated-...]` con todo en cero, conviviendo con un
+  "DOGE/USDC" nuevo y activo; y mercados como ONDO con `active: false` y precios/volumen
+  en cero (pendientes de lanzamiento, probablemente). **Ya corregido**: se descarta
+  cualquier mercado con `active` distinto de `true` antes de procesarlo.
+
+Todo esto está probado con los 32 mercados reales que trajo el propio error de
+producción (pegados literalmente en un test, no inventados) — cubre el caso que
+falló en producción, más las formas anteriores (dict-de-id, lista plana) para no
+volver a romper lo que ya funcionaba. Ver el docstring de `connectors/dex_risex.py`
+para el detalle completo.
 
 ## Importante sobre dónde correr esto
 

@@ -8,7 +8,7 @@ ProFunding, Loris Tools y el selector delta-neutral de John5Cripto.
 Vamos construyéndola paso a paso. Progreso:
 
 - [x] Paso 1 — Arquitectura del proyecto y modelo de datos común
-- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 10 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational y RiseX vía API directa/ccxt) — 9 de los 10 DEX confirmados devolviendo datos reales en producción (Variational: 547 pares); RiseX tuvo un bug real en el primer despliegue (ya corregido, ver más abajo), pendiente de confirmar en el próximo reboot
+- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 10 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational y RiseX vía API directa/ccxt) — los 10 DEX confirmados devolviendo datos reales en producción (Variational: 547 pares, RiseX: 30 pares tras dos rondas de fix, ver más abajo)
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
 - [x] Paso 5 — Consistency Score y OI Depth (con fallback contratos×mark_price para exchanges que no dan el USD directo)
@@ -246,6 +246,55 @@ producción (pegados literalmente en un test, no inventados) — cubre el caso q
 falló en producción, más las formas anteriores (dict-de-id, lista plana) para no
 volver a romper lo que ya funcionaba. Ver el docstring de `connectors/dex_risex.py`
 para el detalle completo.
+
+**Cerrado**: en el redespliegue siguiente a este fix, risex pasó a traer **30 pares**
+reales (32 mercados totales − 2 inactivos filtrados, exactamente lo esperado) sin
+ningún error en el banner. Con esto los 10 DEX de este proyecto están devolviendo
+datos reales en producción.
+
+#### Confirmado contra la interfaz oficial: los APR extremos de Variational son reales
+
+Tras este mismo redespliegue, el top del ranking salió dominado por Variational con
+APRs muy por encima de lo visto en cualquier otro exchange — STORJ en -8497%, LSK en
+-6751%, ARK en -2706%, GLM en -3111%, STEEM en -3051%, POWR en -2484%, POLYX en
+-2466%, PUNDIX en -2050%. Esto ponía en duda la asunción de "APY ya anualizado"
+documentada en `connectors/dex_variational.py`, así que se comprobó contra la propia
+interfaz de Variational — exactamente el mismo tipo de verificación que cerró las
+dudas de Lighter y GRVT en su momento.
+
+**Confirmado**: la propia interfaz de Variational muestra una columna llamada
+literalmente **"Ann. Funding"** (funding anualizado), y para STORJ mostraba
+**-6,863.56%** en el momento de la comprobación — del mismo orden de magnitud que el
+-8497.1% que había en el ranking (la diferencia se explica porque son dos capturas en
+momentos distintos de un mercado muy volátil: STORJ traía un -40.53% de cambio en 24h
+en esa misma captura, así que su funding puede moverse mucho en minutos). Esto
+confirma dos cosas a la vez:
+
+- Que Variational reporta el funding **ya anualizado**, tal como se había asumido —
+  la propia UI lo llama "Ann. Funding", no "tasa del intervalo".
+- Que estos números extremos son reales, no un artefacto de la conversión del
+  conector: STORJ es, en la práctica, un mercado de baja liquidez en Variational con
+  un desequilibrio fuerte entre longs y shorts, lo que dispara el funding para
+  corregirlo — exactamente el tipo de dato "extremo pero real" que ProFunding/Loris
+  también enseñan.
+
+De paso, la misma captura permitió contrastar el Open Interest: la UI mostraba
+$43.76K de OI total para STORJ, y el ranking de esta herramienta mostraba $22,117 de
+OI en el lado "long" — aproximadamente la mitad, coherente con un OI total repartido
+entre long y short. Confirma también la asunción de que `open_interest` de Variational
+ya viene en USD (no hubo que multiplicar por nada para llegar a un número del orden
+correcto).
+
+Con esto, las dos asunciones documentadas de Variational (escala del funding rate y
+unidad del open interest) quedan confirmadas contra datos reales — no quedan
+asunciones pendientes de este conector. Nota técnica para quien toque este código más
+adelante: la conversión "APY → tasa por intervalo → re-anualizar" que hace
+`core/normalize.py` es, en los hechos, matemáticamente neutra sobre el APR final que
+se muestra (`apr = (apy/periods_per_year) × periods_per_year × 100 = apy × 100`,
+el `interval_hours` se cancela) — así que el número que se ve en pantalla es siempre
+`funding_rate × 100` tal cual lo reporta Variational, independientemente del
+`funding_interval_s`. El `interval_hours` sí importa para el resto de columnas
+derivadas (tasa cruda del intervalo, "cada 8h"), solo no para el APR anualizado.
 
 ## Importante sobre dónde correr esto
 

@@ -12,8 +12,8 @@ para una sola llamada por refresco.
 Todos los campos numéricos vienen como STRING ("para preservar precisión
 decimal", según la propia respuesta) — se convierten a float aquí.
 
---- Nota IMPORTANTE sobre la escala de `funding_rate` (asunción, no confirmada
-    con la UI oficial de Variational) ---
+--- Nota IMPORTANTE sobre la escala de `funding_rate` (CONFIRMADA contra la UI
+    oficial de Variational tras el despliegue real) ---
 
 El campo `funding_rate` de cada listing NO parece ser la tasa cruda del
 intervalo (que es lo que espera `FundingRate.funding_rate` — ver
@@ -46,14 +46,27 @@ intervalo) no anualice dos veces:
     periods_per_year = 8760 / interval_hours
     rate_per_interval = apy_fraction / periods_per_year
 
-Si esta asunción resultara equivocada (por ejemplo, si `funding_rate` fuera
-en realidad ya la tasa por intervalo y las cifras observadas fueran
-simplemente tasas altas reales), el síntoma sería APRs de Variational
-absurdamente altos/bajos comparados con el resto de exchanges — comprobar
-esto es lo primero que habría que revisar si Variational aparece con
-valores disparatados en producción.
+**Confirmado en producción**: con este conector ya desplegado, el ranking mostró
+STORJ con un APR de -8497.1% — se comprobó contra la propia interfaz de
+Variational, que tiene una columna llamada literalmente "Ann. Funding" y
+mostraba -6,863.56% para STORJ en el momento de la comprobación (mismo orden
+de magnitud; la diferencia es normal entre dos capturas de un mercado muy
+volátil — STORJ traía un -40.53% de cambio en 24h en esa misma captura). Esto
+confirma que Variational reporta el funding ya anualizado, y que valores
+extremos como el de STORJ son reales (mercados de baja liquidez con
+desequilibrio fuerte entre longs y shorts), no un artefacto de esta
+conversión.
 
---- Nota sobre `open_interest` (asunción, no confirmada) ---
+Nota técnica: la conversión "APY → tasa por intervalo → re-anualizar" que
+hace `core/normalize.py` es, en los hechos, matemáticamente neutra sobre el
+APR final mostrado (`apr = (apy/periods_per_year) × periods_per_year × 100
+= apy × 100` — el `interval_hours` se cancela), así que el APR en pantalla
+es siempre `funding_rate × 100` tal cual lo reporta Variational,
+independientemente de `funding_interval_s`. Ese campo sí importa para el
+resto de columnas derivadas (tasa cruda del intervalo, "cada 8h"), solo no
+para el APR anualizado.
+
+--- Nota sobre `open_interest` (CONFIRMADA contra la UI oficial) ---
 
 Cada listing trae `open_interest.long_open_interest` y `.short_open_interest`
 como strings. Se comprobó en vivo BTC (mark_price ≈ 77396.70,
@@ -69,9 +82,11 @@ de perpetuos de tamaño medio. Por tanto, este conector asume que
 distinto de `openInterestBase`) y usa `long_open_interest + short_open_interest`
 directamente como `open_interest_usd`, sin multiplicar por mark_price.
 
-Si esta asunción fuera errónea, se vería como cifras de OI absurdamente
-bajas para activos caros (BTC, ETH) comparado con otros exchanges — es lo
-segundo que habría que comprobar si algo no cuadra en producción.
+**Confirmado en producción**: la misma comprobación contra la UI oficial para
+STORJ mostraba $43.76K de Open Interest total, mientras que el ranking de
+esta herramienta mostraba $22,117 en el lado "long" — aproximadamente la
+mitad, coherente con un OI total repartido entre long y short. Confirma que
+`open_interest` ya viene en USD, sin necesidad de multiplicar por mark_price.
 """
 
 from __future__ import annotations

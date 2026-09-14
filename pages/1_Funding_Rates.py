@@ -337,8 +337,8 @@ if dead_liquidity:
             [
                 {
                     "símbolo": o.symbol,
-                    "long": f"{o.long_exchange} (OI ${o.oi_long_usd:,.0f})",
-                    "short": f"{o.short_exchange} (OI ${o.oi_short_usd:,.0f})",
+                    "long": f"{o.long_exchange} (OI {_fmt_usd(o.oi_long_usd)})",
+                    "short": f"{o.short_exchange} (OI {_fmt_usd(o.oi_short_usd)})",
                     "spread_apr_descartado": f"{o.spread_apr:.1f}%",
                 }
                 for o in dead_liquidity

@@ -91,11 +91,32 @@ class CexConnector:
         # captura y lo enseña en la interfaz).
         raw = self._client.fetch_funding_rates()
 
+        # ccxt ya ha cargado (o cacheado) el listado oficial de mercados
+        # operables como efecto secundario de fetch_funding_rates() — lo
+        # usamos para descartar símbolos "fantasma" (ver más abajo).
+        known_markets = self._client.markets
+
         interval_default = DEFAULT_INTERVAL_HOURS.get(self.ccxt_id, 8)
         out: list[FundingRate] = []
+        ghost_symbols: list[str] = []
 
         for market_symbol, entry in raw.items():
             if not market_symbol.endswith(f":{self.quote}") and f"/{self.quote}" not in market_symbol:
+                continue
+
+            # Bug real encontrado en producción (Aster/STORJ — ver README):
+            # ccxt puede devolver, dentro de fetch_funding_rates(), un
+            # symbol_id que NO está en el listado oficial de mercados
+            # operables del exchange (`self._client.markets`, cargado por
+            # ccxt internamente). Ese símbolo no aparece en el buscador del
+            # propio exchange ni en su exchangeInfo — es un resto/símbolo
+            # "fantasma" al que ccxt igual le sintetiza una tasa de funding.
+            # No depender de Open Interest para detectarlo (algunos
+            # exchanges, como Aster, ni siquiera soportan consultarlo vía
+            # ccxt): si el símbolo no está en el listado oficial, se
+            # descarta aquí mismo, en el origen.
+            if known_markets and market_symbol not in known_markets:
+                ghost_symbols.append(market_symbol)
                 continue
 
             rate = entry.get("fundingRate")
@@ -121,6 +142,15 @@ class CexConnector:
 
             if self.limit and len(out) >= self.limit:
                 break
+
+        if ghost_symbols:
+            logger.warning(
+                "%s: %d símbolo(s) descartado(s) por no estar en el listado oficial de "
+                "mercados operables (fantasma/delistado, ver README): %s",
+                self.ccxt_id,
+                len(ghost_symbols),
+                ghost_symbols[:10],
+            )
 
         return out
 
@@ -234,4 +264,16 @@ CEX_FACTORY_BY_NAME = {
     "gate": gate,
     "mexc": mexc,
     "htx": htx,
+    # Aster está aquí a propósito aunque se declare venue_type=DEX arriba: la
+    # clave de este diccionario es "¿este exchange usa CexConnector (ccxt) y
+    # por tanto necesita un fetch_open_interest() aparte, símbolo a símbolo,
+    # porque su fetch_funding_rates() masivo no trae OI?" — no "¿es un CEX?".
+    # Aster es un DEX que, en la práctica, se comporta exactamente como un
+    # CEX en este sentido (ver la clase CexConnector). Sin esta entrada,
+    # collect_oi_targets()/fetch_oi_for_targets() en core/opportunities.py
+    # nunca llegan a pedirle el OI real a Aster — es justo el bug que dejaba
+    # colarse en el ranking mercados "fantasma" de Aster con Open Interest
+    # real $0 pero nunca CONFIRMADO como tal (se quedaba en "—", no en "$0"),
+    # así que has_dead_liquidity() no los descartaba. Ver README.
+    "aster": aster,
 }

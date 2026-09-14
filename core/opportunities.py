@@ -114,12 +114,27 @@ def collect_oi_targets(opportunities: list[OpportunityRow], top_n: int = 10) -> 
     Devuelve una tupla (hashable) a propósito, para poder cachear el fetch
     en la capa que lo llame (la página Streamlit) sin tener que hacer
     hashable un dataclass mutable.
+
+    IMPORTANTE (bug real encontrado en producción, ver README — Aster/STORJ):
+    a quién le hace falta esta llamada aparte NO es "quien sea CEX" — es
+    "quien use CexConnector y por tanto no traiga OI en el fetch masivo de
+    funding rates". Aster es un DEX (venue_type=VenueType.DEX) que en la
+    práctica se comporta como un CEX en esto, porque reutiliza CexConnector
+    (ver connectors/cex_ccxt.py). Filtrar aquí por venue_type==CEX dejaba a
+    Aster sin pedir nunca su OI real — se quedaba en "—" (sin consultar) en
+    vez de en "$0" (confirmado), así que `has_dead_liquidity()` nunca lo
+    pillaba y los mercados fantasma de Aster seguían colándose en el
+    ranking. El criterio correcto es "¿hay un conector con OI registrado
+    para este exchange?" (`CEX_FACTORY_BY_NAME`), no el venue_type.
     """
+    from connectors.cex_ccxt import CEX_FACTORY_BY_NAME
+
     targets: dict[OiTarget, float | None] = {}
     for opp in opportunities[:top_n]:
         for side in ("long", "short"):
-            if getattr(opp, f"{side}_venue") == VenueType.CEX and getattr(opp, f"oi_{side}_usd") is None:
-                key = (getattr(opp, f"{side}_exchange"), getattr(opp, f"{side}_raw_symbol"))
+            exchange = getattr(opp, f"{side}_exchange")
+            if exchange in CEX_FACTORY_BY_NAME and getattr(opp, f"oi_{side}_usd") is None:
+                key = (exchange, getattr(opp, f"{side}_raw_symbol"))
                 targets.setdefault(key, getattr(opp, f"{side}_mark_price"))
     return tuple(sorted((exchange, raw_symbol, price) for (exchange, raw_symbol), price in targets.items()))
 

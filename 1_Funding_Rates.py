@@ -1,0 +1,354 @@
+"""
+Herramienta 1: Funding Rates — el screener delta-neutral, con todo lo
+construido en los Pasos 1-6, ahora en una interfaz web en vez de terminal.
+"""
+
+from __future__ import annotations
+
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from core.aggregate import build_matrix, exchange_columns
+from core.data_service import fetch_normalized_rates, filter_rates
+from core.history import WINDOWS_HOURS, historical_apr_all_windows, init_db
+from core.normalize import NormalizedRate
+from core.opportunities import (
+    apply_oi_map,
+    collect_oi_targets,
+    compute_opportunities,
+    fetch_oi_for_targets,
+    has_dead_liquidity,
+)
+
+# Cuántas oportunidades (de arriba del ranking) se enriquecen con OI Depth
+# real. A propósito no son todas: pedir OI símbolo a símbolo para miles de
+# pares sería lento y quemaría el rate limit para nada — solo importa la
+# profundidad de las pocas que ya decidiste mirar.
+OI_ENRICH_TOP_N = 10
+
+# Paleta compartida con el resto del toolkit (mismo verde/ámbar/rojo que el
+# informe de análisis inicial), para que la matriz se sienta parte de la
+# misma herramienta.
+_GREEN = (94, 230, 196)   # mejor para ir LONG (tasa más baja)
+_AMBER = (240, 180, 41)   # neutral
+_RED = (240, 87, 107)     # mejor para ir SHORT (tasa más alta)
+
+
+def _lerp_color(c1: tuple[int, int, int], c2: tuple[int, int, int], t: float) -> tuple[int, int, int]:
+    return tuple(round(a + (b - a) * t) for a, b in zip(c1, c2))
+
+
+def _apr_cell_color(value: float, vmin: float = -50, vmax: float = 50) -> str:
+    t = max(0.0, min(1.0, (value - vmin) / (vmax - vmin)))
+    rgb = _lerp_color(_GREEN, _AMBER, t / 0.5) if t < 0.5 else _lerp_color(_AMBER, _RED, (t - 0.5) / 0.5)
+    return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
+
+
+def _fmt_usd(value: float | None) -> str:
+    """
+    Formatea OI en USD para mostrar en tabla — con guion para None en vez del
+    "None" literal que enseña st.dataframe cuando el valor real es un NaN/None
+    y se le pasa column_config.NumberColumn. Al pre-formatear como texto
+    nosotros, controlamos el resultado exacto.
+    """
+    if value is None:
+        return "—"
+    if value >= 1_000_000:
+        return f"${value / 1_000_000:,.1f}M"
+    return f"${value:,.0f}"
+
+
+def render_matrix_html(matrix: dict[str, dict[str, NormalizedRate]], columns: list[str]) -> str:
+    header = "".join(f"<th style='padding:8px 14px;text-align:right;font-weight:600;'>{ex}</th>" for ex in columns)
+    rows_html = []
+    for symbol in sorted(matrix):
+        row = matrix[symbol]
+        values = {ex: r.apr_pct for ex, r in row.items()}
+        best_long = min(values, key=values.get) if len(values) >= 2 else None
+        best_short = max(values, key=values.get) if len(values) >= 2 else None
+
+        cells = [f"<td style='padding:8px 14px;font-weight:600;'>{symbol}</td>"]
+        for ex in columns:
+            if ex not in row:
+                cells.append(
+                    "<td style='padding:8px 14px;text-align:right;color:#5b6472;'>—</td>"
+                )
+                continue
+            apr = row[ex].apr_pct
+            bg = _apr_cell_color(apr)
+            tag = ""
+            if ex == best_long:
+                tag = " · LONG"
+            elif ex == best_short:
+                tag = " · SHORT"
+            cells.append(
+                f"<td style='padding:8px 14px;text-align:right;background:{bg};color:#0b0e14;"
+                f"font-weight:700;border-radius:4px;'>{apr:+.1f}%{tag}</td>"
+            )
+        rows_html.append(f"<tr>{''.join(cells)}</tr>")
+
+    return f"""
+    <div style="overflow-x:auto;">
+    <table style="width:100%;border-collapse:separate;border-spacing:0 4px;font-size:14px;">
+      <thead><tr><th style='padding:8px 14px;text-align:left;'>Símbolo</th>{header}</tr></thead>
+      <tbody>{''.join(rows_html)}</tbody>
+    </table>
+    </div>
+    """
+
+
+st.set_page_config(page_title="Funding Rates — Funding Toolkit", page_icon="📊", layout="wide")
+
+st.title("📊 Funding Rates")
+st.caption("Arbitraje delta-neutral: ranking, matriz completa, histórico real y consistency score.")
+
+# ---------- Sidebar: fuente de datos y filtros ----------
+with st.sidebar:
+    st.header("Fuente de datos")
+    source = st.radio(
+        "Origen",
+        ["Demo (offline)", "En vivo"],
+        index=0,
+        help="Este entorno de desarrollo no tiene salida a internet hacia los exchanges — "
+             "usa Demo aquí. En vivo funcionará cuando esto corra en un servidor con internet normal.",
+    )
+    offline = source.startswith("Demo")
+
+    st.header("Filtros")
+    venue = st.selectbox("Tipo de venue", ["all", "cex", "dex"], format_func=lambda v: {"all": "Todos", "cex": "Solo CEX", "dex": "Solo DEX"}[v])
+
+    refresh = st.button("🔄 Refrescar datos", use_container_width=True)
+
+# ---------- Carga de datos (con cache) ----------
+@st.cache_data(ttl=60, show_spinner="Consultando exchanges...")
+def load_data(offline: bool):
+    return fetch_normalized_rates(offline)
+
+
+@st.cache_data(ttl=60, show_spinner="Consultando profundidad (OI) de las mejores oportunidades...")
+def load_oi_map(targets: tuple[tuple[str, str, float | None], ...]):
+    # `targets` es una tupla (hashable) a propósito, con el mark_price incluido
+    # (exchange, raw_symbol, mark_price) — así st.cache_data puede cachear esto
+    # sin que le pasemos objetos de conector de ccxt, que no son cacheables.
+    # Ver core/opportunities.py: collect_oi_targets/fetch_oi_for_targets.
+    # Devuelve (oi_map, errores) — los errores se guardan para poder verlos en
+    # el panel de diagnóstico, igual que con los errores de funding rates.
+    if not targets:
+        return {}, {}
+    return fetch_oi_for_targets(targets)
+
+if refresh:
+    load_data.clear()
+    load_oi_map.clear()
+
+try:
+    all_rates, counts, errors = load_data(offline)
+except Exception as e:
+    st.error(f"No se pudo obtener datos: {e}")
+    st.stop()
+
+# Un exchange caído no debe ocultarse en un "0 pares" silencioso — si Binance
+# (por ejemplo) bloquea la IP del servidor, esto lo dice explícitamente en
+# vez de dejarte adivinar por qué la tabla sale más corta de lo esperado.
+if errors:
+    lines = "\n".join(f"- **{ex}**: {msg}" for ex, msg in errors.items())
+    st.warning(f"Algunos exchanges no respondieron:\n\n{lines}", icon="⚠️")
+
+if not all_rates:
+    st.error(
+        "No se obtuvo ningún dato de ningún exchange. Revisa los errores de arriba — "
+        "lo más probable es que el exchange esté bloqueando la IP de este servidor, "
+        "no que no tengas internet."
+    )
+    st.stop()
+
+exchanges_available = sorted({r.exchange for r in all_rates})
+with st.sidebar:
+    exchanges_selected = st.multiselect("Exchanges", exchanges_available, default=exchanges_available)
+
+rates = filter_rates(all_rates, venue, exchanges_selected)
+
+if not rates:
+    st.warning("El filtro no dejó ningún resultado. Prueba a soltar algún exchange del filtro lateral.")
+    st.stop()
+
+# ---------- KPIs ----------
+symbols = {r.symbol for r in rates}
+best = max(rates, key=lambda r: abs(r.apr_pct))
+now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Pares activos", f"{len(rates)}")
+k2.metric("Símbolos únicos", f"{len(symbols)}")
+k3.metric("Exchanges", f"{len(exchanges_selected)}")
+k4.metric("Última actualización", now_str)
+
+st.divider()
+
+# ---------- Tabs: Ranking / Matriz / Histórico ----------
+oi_errors: dict[tuple[str, str], str] = {}  # se rellena en la pestaña Ranking, se enseña en Diagnóstico
+dead_liquidity: list = []  # idem — oportunidades descartadas por OI $0 confirmado (ver has_dead_liquidity)
+tab_ranking, tab_matrix, tab_history = st.tabs(["🏆 Ranking", "🔲 Matriz", "📈 Histórico"])
+
+with tab_ranking:
+    st.caption(
+        "Mejor par long/short por símbolo, con Consistency Score (30d) y OI Depth. "
+        "Esto es lo que verías primero al abrir la herramienta."
+    )
+    history_conn = init_db()
+    opportunities = compute_opportunities(rates, history_conn)
+    history_conn.close()
+
+    if not opportunities:
+        st.info("Ningún símbolo está presente en 2+ exchanges con los filtros actuales — no hay spread que calcular.")
+    else:
+        # OI Depth real para las mejores oportunidades: los CEX no lo traen
+        # en el fetch masivo de funding rates (ccxt no expone un endpoint
+        # bulk para eso), así que se pide aparte, solo para el top N y con
+        # su propia caché — no en cada re-render.
+        oi_targets = collect_oi_targets(opportunities, top_n=OI_ENRICH_TOP_N)
+        oi_map, oi_errors = load_oi_map(oi_targets)
+        apply_oi_map(opportunities, oi_map, top_n=OI_ENRICH_TOP_N)
+
+        # Ver core/opportunities.py::has_dead_liquidity — descubierto en
+        # producción con Aster/STORJ: un mercado con Open Interest $0
+        # confirmado no es una oportunidad ejecutable, aunque el spread de
+        # APR salga enorme. Se saca del ranking en vez de dejarlo arriba.
+        dead_liquidity = [o for o in opportunities if has_dead_liquidity(o)]
+        opportunities = [o for o in opportunities if not has_dead_liquidity(o)]
+
+        if dead_liquidity:
+            symbols_dead = ", ".join(sorted({o.symbol for o in dead_liquidity}))
+            st.caption(
+                f"⚠️ {len(dead_liquidity)} oportunidad(es) descartada(s) del ranking por Open "
+                f"Interest $0 confirmado en una de las dos piernas ({symbols_dead}) — el exchange "
+                "responde un funding rate pero no hay ninguna posición abierta ahí, así que no es "
+                "una operación ejecutable de verdad. Detalle en el diagnóstico de abajo."
+            )
+
+        if not opportunities:
+            st.info(
+                "Todas las oportunidades del top se descartaron por Open Interest $0 confirmado — "
+                "ver el aviso de arriba."
+            )
+
+        df = pd.DataFrame(
+            [
+                {
+                    "Símbolo": o.symbol,
+                    "Long en": f"{o.long_exchange} ({o.long_apr:+.1f}%)",
+                    "Short en": f"{o.short_exchange} ({o.short_apr:+.1f}%)",
+                    "Spread APR": o.spread_apr,
+                    "Consistency (30d)": o.consistency_pct,
+                    "OI long ($)": _fmt_usd(o.oi_long_usd),
+                    "OI short ($)": _fmt_usd(o.oi_short_usd),
+                    "Cuello de botella ($)": _fmt_usd(o.oi_bottleneck_usd)
+                    + (f" ({o.oi_bottleneck_side})" if o.oi_bottleneck_side else ""),
+                }
+                for o in opportunities
+            ]
+        )
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Spread APR": st.column_config.NumberColumn(format="%.1f%%"),
+                "Consistency (30d)": st.column_config.ProgressColumn(
+                    format="%.0f%%", min_value=0, max_value=100
+                ),
+                # OI long/short/Cuello de botella van pre-formateadas como
+                # texto (ver _fmt_usd) a propósito: pasarlas como número con
+                # column_config.NumberColumn enseña el texto literal "None"
+                # para los valores nulos, y no hay forma limpia de evitarlo
+                # desde la config de columna.
+            },
+        )
+        st.caption(
+            "Consistency: % del tiempo (30d) que esta asignación long/short habría sido rentable. "
+            "OI = profundidad de open interest en cada pierna, solo para el top "
+            f"{OI_ENRICH_TOP_N}. «—» = sin dato disponible todavía."
+        )
+
+with tab_matrix:
+    st.caption("Cada símbolo contra cada exchange, sin pre-filtrar — el dato crudo, estilo Loris.")
+    matrix = build_matrix(rates)
+    columns = exchange_columns(rates)
+
+    # Render manual en HTML: st.dataframe + pandas Styler enseña "None" en las
+    # celdas vacías en vez de un guion, y no hay forma limpia de evitarlo con
+    # column_config — así que aquí controlamos el pixel exacto nosotros.
+    st.markdown(render_matrix_html(matrix, columns), unsafe_allow_html=True)
+    st.caption("Verde = mejor sitio para ir long (te pagan más). Rojo = mejor sitio para ir short.")
+
+with tab_history:
+    st.caption("APR histórico real, calculado a partir de snapshots guardados (no la tasa instantánea).")
+    symbol_pick = st.selectbox("Símbolo", sorted(symbols))
+    exchanges_for_symbol = sorted({r.exchange for r in rates if r.symbol == symbol_pick})
+    exchange_pick = st.selectbox("Exchange", exchanges_for_symbol)
+
+    conn = init_db()
+    windows = historical_apr_all_windows(conn, exchange_pick, symbol_pick)
+
+    cols = st.columns(len(WINDOWS_HOURS))
+    for col, (label, stat) in zip(cols, windows.items()):
+        with col:
+            if stat.enough_history and stat.apr_avg is not None:
+                col.metric(label.upper(), f"{stat.apr_avg:+.1f}%")
+            else:
+                col.metric(label.upper(), "s/d", help=f"Solo {stat.samples} snapshots — no hay histórico suficiente")
+
+    history_df = pd.read_sql_query(
+        "SELECT captured_at, apr_pct FROM funding_snapshots "
+        "WHERE exchange = ? AND symbol = ? ORDER BY captured_at",
+        conn,
+        params=(exchange_pick, symbol_pick),
+        parse_dates=["captured_at"],
+    )
+    conn.close()
+
+    if history_df.empty:
+        st.info(
+            "Todavía no hay snapshots guardados para este par. En modo Demo, corre "
+            "`python tools/seed_demo_history.py` para generar 30 días de histórico sintético."
+        )
+    else:
+        st.line_chart(history_df.set_index("captured_at")["apr_pct"], height=320)
+
+st.divider()
+with st.expander("Diagnóstico: pares traídos por exchange"):
+    st.json(counts)
+
+if dead_liquidity:
+    with st.expander(f"Diagnóstico: {len(dead_liquidity)} oportunidad(es) descartada(s) por OI $0"):
+        st.caption(
+            "Ver core/opportunities.py::has_dead_liquidity. No es un fallo de conexión (eso "
+            "sale en 'OI Depth no disponible' de abajo) — es el exchange respondiendo que el "
+            "Open Interest real de esa pierna es exactamente $0."
+        )
+        st.json(
+            [
+                {
+                    "símbolo": o.symbol,
+                    "long": f"{o.long_exchange} (OI ${o.oi_long_usd:,.0f})",
+                    "short": f"{o.short_exchange} (OI ${o.oi_short_usd:,.0f})",
+                    "spread_apr_descartado": f"{o.spread_apr:.1f}%",
+                }
+                for o in dead_liquidity
+            ]
+        )
+
+if oi_errors:
+    with st.expander(f"Diagnóstico: OI Depth no disponible para {len(oi_errors)} pierna(s) del top {OI_ENRICH_TOP_N}"):
+        st.caption(
+            "Motivo real por (exchange, símbolo) de por qué esa pierna concreta se queda en «—» "
+            "en vez de mostrar profundidad — no es que falte el dato, es lo que respondió (o no) el exchange."
+        )
+        st.json({f"{ex} · {sym}": msg for (ex, sym), msg in oi_errors.items()})

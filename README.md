@@ -345,6 +345,58 @@ enorme — no hay nadie al otro lado. Esto es genérico: protege contra este mis
 en cualquier exchange, no solo Aster, y solo actúa sobre dato confirmado, nunca sobre
 una ausencia de dato.
 
+**Vuelta al mismo bug — el fix de `has_dead_liquidity()` no bastaba**: tras desplegar
+lo de arriba, STORJ/Aster seguía apareciendo en el top del ranking, ahora con
+`OI short ($)` en "—" en vez de en "$0". Dos fallos distintos, encadenados:
+
+1. `collect_oi_targets()` en `core/opportunities.py` solo pedía el Open Interest real
+   para piernas con `venue_type == VenueType.CEX`. Aster se declara
+   `venue_type=VenueType.DEX` (es arquitectónicamente un DEX, aunque use
+   `CexConnector`/ccxt por debajo — ver `connectors/cex_ccxt.py`), así que nunca
+   entraba en la lista de piernas a consultar. El criterio correcto no es el
+   venue_type (que es una etiqueta de categoría/visualización), sino "¿este exchange
+   tiene un conector con OI registrado?" — se cambió a comprobar pertenencia en
+   `CEX_FACTORY_BY_NAME` en vez de comparar venue_type.
+2. Aunque se corrija (1), `"aster"` ni siquiera estaba en `CEX_FACTORY_BY_NAME` — se
+   añadió. Pero al intentarlo de verdad se descubrió algo más de fondo: **ccxt NO
+   soporta `fetch_open_interest()` para Aster en absoluto** (`ex.has["fetchOpenInterest"]`
+   es `False`, y su propio código fuente confirma que cae en
+   `raise NotSupported(...)` — no es una bandera mal declarada como pasó con
+   GRVT/`fetchFundingRates`, aquí genuinamente no está implementado). Se intentó además
+   pedir `GET /fapi/v1/openInterest` directo (bypaseando ccxt) contra la propia API de
+   Aster — devolvió **400** incluso para un símbolo real y activo como BTCUSDT (un
+   endpoint inexistente da 404, no 400, así que el endpoint existe pero rechaza la
+   petición por algún motivo no confirmado, posiblemente autenticación). Conclusión: el
+   Open Interest de Aster, hoy, **no se puede consultar de forma fiable** desde este
+   proyecto — ni vía ccxt ni vía REST directo.
+
+Eso deja sin piso la estrategia de "confirmar OI en $0" como forma de detectar este
+mercado fantasma en Aster específicamente (sigue siendo válida y se mantiene para
+cualquier otro exchange donde el Open Interest sí se pueda consultar). El fix real,
+más de raíz, va en el propio conector: **`connectors/cex_ccxt.py`**, dentro de
+`CexConnector.fetch_funding_rates()`, ahora descarta cualquier símbolo que
+`fetch_funding_rates()` de ccxt devuelva pero que NO esté en `self._client.markets`
+— el listado oficial de mercados operables que ccxt ya carga internamente (vía
+`load_markets()`) como efecto secundario de la propia llamada, así que este chequeo
+no cuesta ninguna petición extra. Esto ataja el problema en el origen exacto que
+reportó el usuario ("no me sale al buscar Storj en Aster"): si el símbolo no está en
+el listado oficial —el mismo que alimentaría el buscador del propio exchange—, se
+descarta antes de convertirse siquiera en un `FundingRate`, para cualquier símbolo y
+en cualquier exchange que use `CexConnector`, no solo para el top N del ranking. Se
+verificó con un cliente ccxt simulado (un mercado real presente en `self.markets` +
+uno "fantasma" ausente de ahí pero presente en la respuesta de funding rates): el
+fantasma se descarta, el real se mantiene.
+
+Se deja registrado `"aster": aster` en `CEX_FACTORY_BY_NAME` de todos modos (no hace
+daño: si algún día ccxt añade soporte, empezará a funcionar solo) — con esto, un
+intento de pedir su OI real para el top N falla con un error explícito
+(`NotSupported: aster fetchOpenInterest() is not supported yet`) visible en el
+expander de diagnóstico "OI Depth no disponible", en vez de un "—" mudo sin
+explicación. Entre el filtro por listado oficial (que ya evita que aparezcan
+fantasmas) y este error explícito (que explica honestamente por qué Aster nunca va a
+mostrar profundidad de OI en el top del ranking), la interfaz ya no deja al usuario
+adivinando.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

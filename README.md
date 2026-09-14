@@ -387,6 +387,18 @@ verificó con un cliente ccxt simulado (un mercado real presente en `self.market
 uno "fantasma" ausente de ahí pero presente en la respuesta de funding rates): el
 fantasma se descarta, el real se mantiene.
 
+**Tercera vuelta — el filtro aún dejaba pasar a STORJ**: tras desplegar lo de arriba,
+STORJ seguía en el ranking bajo `aster`. Investigando `parse_market()` de ccxt para
+Aster se vio la causa: ccxt NO excluye de `self.markets` los símbolos cuyo `status`
+en `exchangeInfo` no es `"TRADING"` (delistados, suspendidos, en pre-lanzamiento...)
+— los incluye igual, solo que marcados con `active: False`. El chequeo anterior
+("¿está el símbolo en `self.markets`?") daba por bueno cualquier símbolo presente,
+activo o no, así que a STORJ —presente pero inactivo— se le seguía dejando pasar.
+Se amplió el filtro para comprobar también `active`: un símbolo se descarta si falta
+del listado por completo O si está pero con `active is False`. Se verificó con un
+cliente ccxt simulado con los tres casos a la vez (uno real y activo, uno presente
+pero `active: False`, uno ausente del todo): solo el real y activo se mantiene.
+
 Se deja registrado `"aster": aster` en `CEX_FACTORY_BY_NAME` de todos modos (no hace
 daño: si algún día ccxt añade soporte, empezará a funcionar solo) — con esto, un
 intento de pedir su OI real para el top N falla con un error explícito

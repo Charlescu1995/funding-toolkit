@@ -108,14 +108,20 @@ class CexConnector:
             # ccxt puede devolver, dentro de fetch_funding_rates(), un
             # symbol_id que NO está en el listado oficial de mercados
             # operables del exchange (`self._client.markets`, cargado por
-            # ccxt internamente). Ese símbolo no aparece en el buscador del
-            # propio exchange ni en su exchangeInfo — es un resto/símbolo
-            # "fantasma" al que ccxt igual le sintetiza una tasa de funding.
-            # No depender de Open Interest para detectarlo (algunos
-            # exchanges, como Aster, ni siquiera soportan consultarlo vía
-            # ccxt): si el símbolo no está en el listado oficial, se
-            # descarta aquí mismo, en el origen.
-            if known_markets and market_symbol not in known_markets:
+            # ccxt internamente) — o que SÍ está, pero marcado como inactivo.
+            # ccxt incluye en `self.markets` TODOS los símbolos que trae
+            # exchangeInfo, tengan o no `status == "TRADING"` — a los que no
+            # lo tienen los marca con `active: False` en vez de excluirlos
+            # (confirmado leyendo `parse_market()` de ccxt para Aster). Un
+            # símbolo así no aparece en el buscador del propio exchange ni es
+            # operable — es un resto/símbolo "fantasma" al que ccxt igual le
+            # sintetiza una tasa de funding. No depender de Open Interest
+            # para detectarlo (algunos exchanges, como Aster, ni siquiera lo
+            # soportan vía ccxt): se descarta aquí mismo, en el origen, tanto
+            # si falta del listado como si está pero inactivo.
+            market_info = known_markets.get(market_symbol) if known_markets else None
+            is_ghost = known_markets and (market_info is None or market_info.get("active") is False)
+            if is_ghost:
                 ghost_symbols.append(market_symbol)
                 continue
 

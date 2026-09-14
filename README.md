@@ -8,7 +8,7 @@ ProFunding, Loris Tools y el selector delta-neutral de John5Cripto.
 Vamos construyéndola paso a paso. Progreso:
 
 - [x] Paso 1 — Arquitectura del proyecto y modelo de datos común
-- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 10 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational y RiseX vía API directa/ccxt) — los 10 DEX confirmados devolviendo datos reales en producción (Variational: 547 pares, RiseX: 30 pares tras dos rondas de fix, ver más abajo)
+- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 13 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational, RiseX, Backpack, Nado y Hibachi vía API directa/ccxt) — los 10 primeros DEX confirmados devolviendo datos reales en producción (Variational: 547 pares, RiseX: 30 pares tras dos rondas de fix, ver más abajo); Backpack, Nado y Hibachi son la cuarta tanda, investigados y probados con datos sintéticos que reproducen la forma real de sus APIs, **pendientes de confirmar contra tráfico real de producción** (ver sección dedicada más abajo)
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
 - [x] Paso 5 — Consistency Score y OI Depth (con fallback contratos×mark_price para exchanges que no dan el USD directo)
@@ -408,6 +408,65 @@ explicación. Entre el filtro por listado oficial (que ya evita que aparezcan
 fantasmas) y este error explícito (que explica honestamente por qué Aster nunca va a
 mostrar profundidad de OI en el top del ranking), la interfaz ya no deja al usuario
 adivinando.
+
+### DEX nuevos, cuarta tanda (Backpack, Nado, Hibachi)
+
+Igual que con las tandas anteriores: investigación primero (contra la API en vivo con
+WebFetch, no solo contra la documentación), luego el código, luego pruebas sintéticas
+que reproducen la forma real de la respuesta de cada exchange (mockeando `requests`),
+y por último este apartado del README. Este entorno de desarrollo no tiene salida de
+red hacia estos exchanges (solo hacia PyPI), así que las pruebas sintéticas — con
+datos calcados de respuestas reales observadas vía WebFetch — son el sustituto de
+"correrlo de verdad", igual que con Lighter/Paradex/Extended/Pacifica en su momento.
+
+**Los tres son conectores "planos" — ninguno necesita pool de hilos** (a diferencia de
+edgeX/GRVT): Backpack y Hibachi resuelven todo con endpoints bulk directos; Nado
+necesita dos llamadas GET (una para precio/funding/OI, otra para el estado del
+mercado), pero ambas bulk, sin iterar símbolo a símbolo.
+
+- **Backpack** (`connectors/dex_backpack.py`): tres endpoints bulk —
+  `/api/v1/markets` (metadata + `fundingInterval` en ms, y `marketType` para separar
+  perp de spot, que vienen mezclados en el mismo listado), `/api/v1/markPrices`
+  (funding rate crudo del intervalo + mark price) y `/api/v1/openInterest` (OI en
+  activo base, se multiplica por mark price). Se descartan los mercados con
+  `orderBookState != "Open"`. Todo confirmado en vivo vía WebFetch.
+- **Nado** (`connectors/dex_nado.py`): el más enrevesado de investigar. El endpoint
+  bulk que documenta la API (`/gateway/v1/query?type=all_products`) **ignora el
+  parámetro `type` en vivo** y siempre devuelve el mismo payload que `type=symbols`
+  (solo specs de contrato, sin precio/funding/OI) — se probaron una decena de valores
+  de `type=` distintos y todos hicieron lo mismo. El dato real bulk estaba en una
+  superficie de API totalmente distinta y no mencionada donde se esperaba:
+  `GET /archive/v2/contracts` (API v2, confirmada en vivo, con funding/mark
+  price/OI-en-USD ya calculados para todos los mercados de golpe). El estado
+  operable (`trading_status`) sí hay que sacarlo de `/gateway/v1/query?type=symbols`
+  (ese sí funciona tal cual la doc). El `funding_rate` de `/archive/v2/contracts` es,
+  según la documentación de mecánica de funding de Nado, la tasa equivalente a 24h
+  (3× la tasa de 8h), no la tasa horaria real que se liquida — se divide entre 24
+  antes de guardarlo, mismo patrón que la conversión APY→intervalo que ya se hizo
+  para Variational. **Esta división entre 24 está pendiente de contrastar contra la
+  interfaz oficial de Nado en producción real** — si el APR de Nado sale
+  sistemáticamente ×24 o ÷24 de más, este es el sitio a revisar primero.
+- **Hibachi** (`connectors/dex_hibachi.py`): investigado instalando el SDK oficial
+  (`hibachi-xyz` de PyPI, requiere Python ≥3.13 — se instaló en un virtualenv aparte)
+  y leyendo su código fuente directamente, en vez de fiarse solo de la doc. Esto
+  reveló un bug de la propia doc/SDK: el cliente se construye con un parámetro
+  `api_url` que por defecto apunta a `api.hibachi.xyz`, pero las peticiones públicas
+  de datos de mercado en realidad usan SIEMPRE `data_api_url`
+  (`data-api.hibachi.xyz`) — confirmado leyendo `executors/httpx.py` del SDK.
+  Probar `api.hibachi.xyz/market/exchange-info` a pelo (lo que sugeriría la doc a
+  primera vista) da 404; el dominio correcto es `data-api.hibachi.xyz`. Una vez
+  resuelto eso, el propio endpoint `/market/inventory` (pensado para listar
+  mercados) ya trae funding/mark price/OI para todos los mercados de golpe — no
+  hacían falta las llamadas por símbolo que sugería la doc a primera vista. Único
+  punto sin confirmar en vivo: el intervalo de liquidación (se usa 1h fijo, según la
+  doc conceptual de Hibachi — la API no lo expone como campo explícito, a diferencia
+  de Backpack/RiseX/Aster).
+
+En los tres casos se sigue el mismo patrón fail-loud del resto de conectores:
+`RuntimeError` si no queda ningún par válido, `logger.warning` por símbolos
+descartados individualmente sin tirar el resto, y el mismo filtro de "solo mercados
+realmente operables" que ya nos enseñó el caso Aster/STORJ (aquí: `orderBookState`
+en Backpack, `trading_status` en Nado, `status`+`symbolStatus` en Hibachi).
 
 ## Importante sobre dónde correr esto
 

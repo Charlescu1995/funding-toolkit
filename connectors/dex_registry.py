@@ -11,11 +11,14 @@ de una misma clase genérica como pasa con los CEX.
 from __future__ import annotations
 
 from .cex_ccxt import aster
+from .dex_backpack import backpack
 from .dex_edgex import edgex
 from .dex_extended import extended
 from .dex_grvt import grvt
+from .dex_hibachi import hibachi
 from .dex_hyperliquid import HyperliquidConnector
 from .dex_lighter import lighter
+from .dex_nado import nado
 from .dex_pacifica import pacifica
 from .dex_paradex import paradex
 from .dex_risex import risex
@@ -37,4 +40,7 @@ ALL_DEX_FACTORIES = [
     grvt,
     variational,
     risex,
+    backpack,
+    nado,
+    hibachi,
 ]

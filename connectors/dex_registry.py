@@ -11,6 +11,7 @@ de una misma clase genérica como pasa con los CEX.
 from __future__ import annotations
 
 from .cex_ccxt import aster
+from .dex_apex import apex
 from .dex_backpack import backpack
 from .dex_edgex import edgex
 from .dex_extended import extended
@@ -23,6 +24,7 @@ from .dex_pacifica import pacifica
 from .dex_paradex import paradex
 from .dex_risex import risex
 from .dex_variational import variational
+from .dex_vertex import vertex
 
 
 def hyperliquid() -> HyperliquidConnector:
@@ -43,4 +45,6 @@ ALL_DEX_FACTORIES = [
     backpack,
     nado,
     hibachi,
+    vertex,
+    apex,
 ]

@@ -8,7 +8,7 @@ ProFunding, Loris Tools y el selector delta-neutral de John5Cripto.
 Vamos construyéndola paso a paso. Progreso:
 
 - [x] Paso 1 — Arquitectura del proyecto y modelo de datos común
-- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 13 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational, RiseX, Backpack, Nado y Hibachi vía API directa/ccxt) — los 10 primeros DEX confirmados devolviendo datos reales en producción (Variational: 547 pares, RiseX: 30 pares tras dos rondas de fix, ver más abajo); Backpack, Nado y Hibachi son la cuarta tanda, investigados y probados con datos sintéticos que reproducen la forma real de sus APIs, **pendientes de confirmar contra tráfico real de producción** (ver sección dedicada más abajo)
+- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 15 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational, RiseX, Backpack, Nado, Hibachi, Vertex y ApeX vía API directa/ccxt) — los 13 primeros DEX confirmados devolviendo datos reales en producción (Variational: 547 pares, RiseX: 30 pares tras dos rondas de fix, Backpack/Nado/Hibachi sin ningún error en su primer despliegue real, ver más abajo); Vertex y ApeX son la quinta tanda — ApeX confirmado en vivo, Vertex construido solo a partir de documentación (no se pudo alcanzar su API desde este entorno), **pendiente de confirmar contra tráfico real de producción** (ver sección dedicada más abajo). Se investigó también Drift Protocol y se descartó: su API quedó inutilizable tras el hackeo de ~$285-295M de abril 2026 y sus dominios oficiales redirigen a un fork no oficial ("Velocity Exchange") que no es Drift — ver sección dedicada
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
 - [x] Paso 5 — Consistency Score y OI Depth (con fallback contratos×mark_price para exchanges que no dan el USD directo)
@@ -467,6 +467,62 @@ En los tres casos se sigue el mismo patrón fail-loud del resto de conectores:
 descartados individualmente sin tirar el resto, y el mismo filtro de "solo mercados
 realmente operables" que ya nos enseñó el caso Aster/STORJ (aquí: `orderBookState`
 en Backpack, `trading_status` en Nado, `status`+`symbolStatus` en Hibachi).
+
+### DEX nuevos, quinta tanda (Vertex, ApeX) — y por qué Drift se descartó
+
+Se pidió investigar tres exchanges: Drift Protocol, Vertex Protocol y ApeX Protocol.
+Drift se descartó por completo tras la investigación — vale la pena documentar por qué,
+para no volver a proponerlo sin más contexto:
+
+**Drift Protocol**: su infraestructura de API pública lleva caída desde que sufrió un
+hackeo de ~$285-295M (DPRK, abril 2026) — los dominios documentados
+(`data.api.drift.trade`, `mainnet-beta.api.drift.trade`, `dlob.drift.trade`) no
+resuelven DNS. Sus propios dominios de docs/app (`docs.drift.trade`, `app.drift.trade`)
+redirigen ahora a **Velocity Exchange**, un fork que sus propios documentos afirman
+explícitamente que NO es Drift ("Velocity should not be described simply as Drift
+under a new name") — con solo 4 mercados y muy poca liquidez real. Además, los datos
+de Drift en sí (cuando su API funcionaba) vivían on-chain vía Solana RPC
+(`driftpy`, leyendo cuentas `PerpMarket` directamente), no detrás de una REST API
+simple como el resto de exchanges de este proyecto — arquitectura totalmente distinta
+que habría exigido un módulo aparte. Se decidió (contigo) saltar Drift por ahora en vez
+de etiquetar el fork Velocity como si fuera Drift.
+
+**Vertex Protocol** (`connectors/dex_vertex.py`): es la arquitectura de la que Nado es
+fork, pero NO es un simple "copiar Nado" — se comprobó activamente y hay diferencias
+reales. El equivalente al endpoint bulk `GET archive/v2/contracts` de Nado no existe en
+Vertex según su propia doc: su superficie "archive" es **POST** con cuerpo JSON, no GET.
+**No se pudo verificar nada de esto en vivo** — los hosts `*.prod.vertexprotocol.com`
+no son alcanzables desde este entorno de desarrollo (ni siquiera se pudo resolver su
+`robots.txt`), así que este conector está construido enteramente a partir de la
+documentación oficial, con el mismo nivel de confianza que tuvieron en su momento
+Lighter/Paradex/Extended/Pacifica: pendiente de confirmar contra tráfico real. Dos
+asunciones documentadas explícitamente como inciertas en el propio conector:
+- El open interest (`open_interests` del endpoint `market_snapshots`) se asume que
+  YA viene en USD (al revés que la mayoría de conectores de este proyecto) — el único
+  valor de ejemplo real de la documentación, dividido entre 1e18, da ~2.9M; interpretado
+  como unidades de BTC sería un open interest físicamente imposible (más BTC del que
+  existe en circulación), así que USD es la lectura más plausible, pero no hay forma de
+  confirmarlo sin acceso real a la API.
+- No hay ningún campo de estado operable documentado para `type=symbols` en Vertex (a
+  diferencia de Aster/RiseX/Backpack/Nado/Hibachi) — así que este conector NO filtra
+  mercados fantasma/delistados. Es un hueco conocido y deliberado, no un descuido.
+
+**ApeX Omni** (`connectors/dex_apex.py`): el más limpio de investigar de los tres —
+confirmado 100% en vivo vía WebFetch. Dato importante: ApeX tuvo un producto anterior
+("ApeX Pro", sobre StarkEx) que se discontinuó (comunicado oficial "ApeX Pro Sunset",
+marzo 2025) — su API vieja ya no funciona (devuelve error interno genérico), así que
+este conector apunta exclusivamente al producto actual, "ApeX Omni"
+(`omni.apex.exchange`). Hallazgo real de arquitectura: a diferencia de TODOS los demás
+DEX de este proyecto, ApeX Omni no tiene ningún endpoint bulk que funcione — se probó
+en vivo `/v3/ticker` sin símbolo, con varios símbolos separados por coma, y ambos casos
+devuelven `{"data": []}` vacío; hay que pedir el ticker de cada símbolo por separado.
+Por eso este conector usa un pool de hilos (mismo patrón que edgeX/GRVT), pidiendo el
+universo de símbolos candidatos desde `/v3/config` y su ticker individual en paralelo.
+Tampoco hay ningún campo de estado operable — el proxy real es si `/v3/ticker` de ese
+símbolo devuelve datos o `[]` (ya lo resuelve el propio pool de hilos, sin filtro
+aparte). Funding rate y Open Interest confirmados en vivo con el mismo rigor que
+Backpack: `fundingRate` es tasa cruda horaria (no anualizada), `openInterest` viene en
+unidades del activo base y hay que multiplicarlo por `markPrice`.
 
 ## Importante sobre dónde correr esto
 

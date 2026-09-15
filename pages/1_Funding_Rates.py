@@ -123,7 +123,7 @@ with st.sidebar:
     st.header("Filtros")
     venue = st.selectbox("Tipo de venue", ["all", "cex", "dex"], format_func=lambda v: {"all": "Todos", "cex": "Solo CEX", "dex": "Solo DEX"}[v])
 
-    refresh = st.button("🔄 Refrescar datos", use_container_width=True)
+    refresh = st.button("🔄 Refrescar datos", width="stretch")
 
 # ---------- Carga de datos (con cache) ----------
 @st.cache_data(ttl=60, show_spinner="Consultando exchanges...")
@@ -257,7 +257,7 @@ with tab_ranking:
 
         st.dataframe(
             df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Spread APR": st.column_config.NumberColumn(format="%.1f%%"),

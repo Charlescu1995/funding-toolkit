@@ -64,6 +64,18 @@ def _fmt_usd(value: float | None) -> str:
     return f"${value:,.0f}"
 
 
+def _fmt_pct(value: float | None) -> str:
+    """
+    Igual que _fmt_usd pero para porcentajes con signo de "—" cuando falta el
+    dato (p.ej. price_spread_pct sin mark_price en alguna de las dos piernas).
+    Mismo motivo que _fmt_usd: pre-formatear como texto nosotros evita el
+    "None" literal que enseña column_config.NumberColumn con valores nulos.
+    """
+    if value is None:
+        return "—"
+    return f"{value:.2f}%"
+
+
 def render_matrix_html(matrix: dict[str, dict[str, NormalizedRate]], columns: list[str]) -> str:
     header = "".join(f"<th style='padding:8px 14px;text-align:right;font-weight:600;'>{ex}</th>" for ex in columns)
     rows_html = []
@@ -245,6 +257,7 @@ with tab_ranking:
                     "Long en": f"{o.long_exchange} ({o.long_apr:+.1f}%)",
                     "Short en": f"{o.short_exchange} ({o.short_apr:+.1f}%)",
                     "Spread APR": o.spread_apr,
+                    "Price Spread": _fmt_pct(o.price_spread_pct),
                     "Consistency (30d)": o.consistency_pct,
                     "OI long ($)": _fmt_usd(o.oi_long_usd),
                     "OI short ($)": _fmt_usd(o.oi_short_usd),
@@ -272,6 +285,9 @@ with tab_ranking:
             },
         )
         st.caption(
+            "Price Spread: diferencia de precio (mark price) entre las dos piernas — un coste que "
+            "se paga una sola vez al entrar y que puede comerse varios días de funding acumulado si "
+            "sale alto; no confundir con el Spread APR, que es el beneficio recurrente. "
             "Consistency: % del tiempo (30d) que esta asignación long/short habría sido rentable. "
             "OI = profundidad de open interest en cada pierna, solo para el top "
             f"{OI_ENRICH_TOP_N}. «—» = sin dato disponible todavía."

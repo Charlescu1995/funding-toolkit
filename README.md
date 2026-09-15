@@ -11,7 +11,7 @@ Vamos construyéndola paso a paso. Progreso:
 - [x] Paso 2 — Conectores de datos: 8 CEX (Binance, Bybit, OKX, Bitget, Gate vía ccxt; KuCoin/MEXC/HTX con conector propio — ccxt no soporta `fetchFundingRates()` para estos tres, ver sexta tanda más abajo) + 15 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational, RiseX, Backpack, Nado, Hibachi, Vertex y ApeX vía API directa/ccxt) — los 13 primeros DEX confirmados devolviendo datos reales en producción (Variational: 547 pares, RiseX: 30 pares tras dos rondas de fix, Backpack/Nado/Hibachi sin ningún error en su primer despliegue real, ver más abajo); Vertex y ApeX son la quinta tanda — ApeX confirmado en vivo, Vertex construido solo a partir de documentación (no se pudo alcanzar su API desde este entorno) y CONFIRMADO en producción bloqueado por red (mismo patrón que Binance/Bybit — ver sección dedicada). Se investigó también Drift Protocol y se descartó: su API quedó inutilizable tras el hackeo de ~$285-295M de abril 2026 y sus dominios oficiales redirigen a un fork no oficial ("Velocity Exchange") que no es Drift — ver sección dedicada
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
-- [x] Paso 5 — Consistency Score y OI Depth (con fallback contratos×mark_price para exchanges que no dan el USD directo)
+- [x] Paso 5 — Consistency Score, OI Depth y Price Spread (con fallback contratos×mark_price para exchanges que no dan el USD directo; ver séptima tanda para Price Spread)
 - [x] Paso 6 — Vista ranking + vista matriz (CLI), con filtros por venue/exchange
 - [x] Paso 9 — Interfaz Streamlit (Home + página Funding Rates: Ranking / Matriz / Histórico), desplegada en Streamlit Cloud
 - [ ] Paso 7 — Alertas por Telegram (pendiente, a petición tuya)
@@ -623,6 +623,57 @@ de los tres da un APR o un Open Interest claramente disparatado, revisar
 primero los puntos marcados arriba como "confirmado en vivo, un solo valor
 observado" (el campo `status`/`contract_status`/`apiAllowed` de cada uno,
 visto con un único ejemplo cada vez).
+
+### Price Spread, séptima tanda (comparativa con Kusi/Smartbitrage, punto 3)
+
+A raíz de comparar este proyecto contra los requisitos de otras herramientas
+del mismo tipo (Kusi, Smartbitrage, Usenami), salió un hueco real: el `mark_price`
+de cada pierna ya se capturaba y llegaba hasta `OpportunityRow.long_mark_price`/
+`short_mark_price`, pero en ningún sitio se calculaba la diferencia entre
+ambos ni se mostraba. Es un dato de riesgo importante y distinto del Spread
+APR: el Spread APR es el beneficio recurrente (se cobra cada intervalo de
+funding), mientras que el Price Spread es un coste que se paga una sola vez,
+al entrar en la operación (y otra vez al salir, si los precios no han vuelto
+a converger) — un spread de funding enorme no sirve de nada si hace falta
+comprar la pierna long bastante más cara que donde se vende la pierna short.
+
+Implementación:
+
+- **`core/scoring.py::price_spread()`** (nueva función, mismo patrón que
+  `oi_depth()`: toma las dos piernas como `NormalizedRate` y devuelve un
+  dataclass, aquí `PriceSpread`). Fórmula: `abs(short_price - long_price) /
+  long_price * 100` — siempre en valor absoluto a propósito, porque lo que
+  importa es CUÁNTO cuesta entrar, no qué lado está más caro (eso ya lo dice
+  qué exchange es long/short). Devuelve `None` (no inventa un 0) cuando a
+  cualquiera de las dos piernas le falta el `mark_price`, o cuando el precio
+  de la pierna long es exactamente 0 (evita división por cero).
+- **`core/opportunities.py`**: nuevo campo `OpportunityRow.price_spread_pct`,
+  calculado en `compute_opportunities()` junto a `oi_depth()`.
+- **`pages/1_Funding_Rates.py`**: nueva columna "Price Spread" en la tabla de
+  Ranking (entre Spread APR y Consistency), pre-formateada como texto vía un
+  nuevo helper `_fmt_pct()` — mismo motivo que `_fmt_usd()` con las columnas
+  de OI: pasar el valor crudo con `column_config.NumberColumn` enseña el
+  texto literal "None" para las filas sin dato. Caption actualizado
+  explicando la diferencia entre Price Spread (coste único) y Spread APR
+  (beneficio recurrente).
+- **`cli.py`**: misma columna añadida a la tabla de terminal (Rich), con
+  color de aviso (rojo ≥1%, ámbar ≥0.3%, tenue si es bajo) para que salte a
+  la vista cuando el coste de entrada empieza a comerse una porción grande
+  del Spread APR — umbrales elegidos a criterio propio (no vienen de ningún
+  dato de mercado ni de Kusi/Smartbitrage), fácil de ajustar si en la
+  práctica se ven demasiados falsos avisos.
+
+Probado con datos sintéticos (`price_spread()` con precios normales, con un
+`mark_price=None` en una pierna, y con `mark_price=0` en la pierna long para
+confirmar que no revienta por división por cero; y `compute_opportunities()`
+de punta a punta comprobando que el campo llega bien a `OpportunityRow`).
+
+No se ha tocado la lógica de ranking ni se ha añadido ningún filtro
+automático (a diferencia de `has_dead_liquidity()` con el OI en $0): de
+momento Price Spread es solo informativo, una columna más a mirar. Si en la
+práctica conviene descartar o avisar más fuerte cuando el Price Spread sale
+muy alto, es un cambio pequeño a partir de aquí — pero no se ha hecho porque
+no se pidió.
 
 ## Importante sobre dónde correr esto
 

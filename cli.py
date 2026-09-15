@@ -102,6 +102,7 @@ def render_opportunities(rates: list[NormalizedRate]) -> None:
     table.add_column("LONG en (recibe)", justify="left")
     table.add_column("SHORT en (recibe)", justify="left")
     table.add_column("Spread APR (ahora)", justify="right")
+    table.add_column("Price Spread", justify="right")
     table.add_column("Consistency\n(30d)", justify="right")
     table.add_column("OI long", justify="right")
     table.add_column("OI short", justify="right")
@@ -118,11 +119,20 @@ def render_opportunities(rates: list[NormalizedRate]) -> None:
         if opp.oi_bottleneck_side:
             bottleneck_cell += f" [dim]({opp.oi_bottleneck_side})[/dim]"
 
+        if opp.price_spread_pct is None:
+            pspread_cell = "[dim]s/d[/dim]"
+        else:
+            # Aviso visual si el coste de entrada (una sola vez) ya se come
+            # una porción grande del beneficio recurrente (Spread APR).
+            pspread_style = "red" if opp.price_spread_pct >= 1.0 else ("yellow" if opp.price_spread_pct >= 0.3 else "dim")
+            pspread_cell = f"[{pspread_style}]{opp.price_spread_pct:.2f}%[/{pspread_style}]"
+
         table.add_row(
             opp.symbol,
             f"{opp.long_exchange} ({opp.long_apr:+.1f}%)",
             f"{opp.short_exchange} ({opp.short_apr:+.1f}%)",
             f"[bold green]{opp.spread_apr:.1f}%[/bold green]",
+            pspread_cell,
             cons_cell,
             _fmt_usd(opp.oi_long_usd),
             _fmt_usd(opp.oi_short_usd),

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from connectors.base import VenueType
 from core.normalize import NormalizedRate
-from core.scoring import oi_depth
+from core.scoring import oi_depth, price_spread
 from core.scoring import consistency_score as _consistency_score
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ class OpportunityRow:
     short_apr: float
     short_mark_price: float | None
     spread_apr: float
+    price_spread_pct: float | None
     consistency_pct: float | None
     consistency_samples: int
     oi_long_usd: float | None
@@ -65,6 +66,7 @@ def compute_opportunities(
             cons_samples = cons.samples
 
         depth = oi_depth(long_leg, short_leg)
+        pspread = price_spread(long_leg, short_leg)
 
         rows.append(
             OpportunityRow(
@@ -80,6 +82,7 @@ def compute_opportunities(
                 short_apr=short_leg.apr_pct,
                 short_mark_price=short_leg.mark_price,
                 spread_apr=spread,
+                price_spread_pct=pspread.spread_pct,
                 consistency_pct=cons_pct,
                 consistency_samples=cons_samples,
                 oi_long_usd=depth.long_oi_usd,

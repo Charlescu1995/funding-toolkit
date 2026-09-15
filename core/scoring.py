@@ -27,6 +27,19 @@ Cuánto open interest hay en cada pierna de la operación. No es exactamente
 barata estándar: si una de las dos piernas tiene un OI muy bajo comparado con
 el tamaño que quieres mover, esa es la señal de alerta de que vas a sufrir
 slippage entrando o saliendo.
+
+Price Spread (Paso 6, punto 3 de la comparativa con Kusi/Smartbitrage)
+------------------------------------------------------------------------
+Un APR de spread altísimo no sirve de nada si para conseguirlo hay que
+comprar la pierna long a un precio y vender la pierna short a otro precio
+bastante distinto — la diferencia de precio (`mark_price`) entre exchanges se
+come de un plumazo varios días de funding acumulado, porque es un coste que
+se paga una sola vez, al entrar (y otra vez al salir, si los precios no han
+vuelto a converger). Es habitual que sea pequeño (unas pocas décimas de %)
+entre CEX grandes en el mismo símbolo, pero puede dispararse en símbolos poco
+líquidos o en RWA (acciones/oro tokenizado), donde cada exchange puede llevar
+su propio índice de precio. Por eso Kusi/Smartbitrage lo tratan como un dato
+de riesgo aparte del spread de funding, no como parte del mismo número.
 """
 
 from __future__ import annotations
@@ -102,3 +115,33 @@ def oi_depth(long_rate: NormalizedRate, short_rate: NormalizedRate) -> OIDepth:
     short_oi = short_rate.open_interest_usd
     bottleneck = min(long_oi, short_oi) if long_oi is not None and short_oi is not None else None
     return OIDepth(long_oi_usd=long_oi, short_oi_usd=short_oi, bottleneck_usd=bottleneck)
+
+
+@dataclass
+class PriceSpread:
+    long_price: float | None
+    short_price: float | None
+    spread_pct: float | None  # diferencia relativa de precio entre las dos piernas, en % (siempre >= 0)
+
+
+def price_spread(long_rate: NormalizedRate, short_rate: NormalizedRate) -> PriceSpread:
+    """
+    Diferencia de precio (mark_price) entre las dos piernas de una oportunidad,
+    en % sobre el precio de la pierna long.
+
+    Se expresa siempre en valor absoluto a propósito: lo que importa aquí no
+    es qué lado está más caro (eso ya lo dice qué exchange es long/short),
+    sino CUÁNTO cuesta en precio entrar en la operación — un coste que se
+    paga una sola vez, a diferencia del funding que se cobra/paga cada
+    intervalo.
+
+    None cuando a cualquiera de las dos piernas le falta el mark_price (pasa,
+    p.ej., si algún conector no lo trae) o cuando el precio long es 0 — no se
+    inventa un número, se deja como "—" en la interfaz, igual que con OI.
+    """
+    long_price = long_rate.mark_price
+    short_price = short_rate.mark_price
+    if long_price is None or short_price is None or long_price == 0:
+        return PriceSpread(long_price=long_price, short_price=short_price, spread_pct=None)
+    spread_pct = abs(short_price - long_price) / long_price * 100
+    return PriceSpread(long_price=long_price, short_price=short_price, spread_pct=spread_pct)

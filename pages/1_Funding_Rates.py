@@ -261,8 +261,12 @@ with tab_ranking:
                     "Consistency (30d)": o.consistency_pct,
                     "OI long ($)": _fmt_usd(o.oi_long_usd),
                     "OI short ($)": _fmt_usd(o.oi_short_usd),
-                    "Cuello de botella ($)": _fmt_usd(o.oi_bottleneck_usd)
+                    "Cuello de botella OI ($)": _fmt_usd(o.oi_bottleneck_usd)
                     + (f" ({o.oi_bottleneck_side})" if o.oi_bottleneck_side else ""),
+                    "Vol 24h long ($)": _fmt_usd(o.volume_long_usd),
+                    "Vol 24h short ($)": _fmt_usd(o.volume_short_usd),
+                    "Cuello de botella Vol ($)": _fmt_usd(o.volume_bottleneck_usd)
+                    + (f" ({o.volume_bottleneck_side})" if o.volume_bottleneck_side else ""),
                 }
                 for o in opportunities
             ]
@@ -290,7 +294,11 @@ with tab_ranking:
             "sale alto; no confundir con el Spread APR, que es el beneficio recurrente. "
             "Consistency: % del tiempo (30d) que esta asignación long/short habría sido rentable. "
             "OI = profundidad de open interest en cada pierna, solo para el top "
-            f"{OI_ENRICH_TOP_N}. «—» = sin dato disponible todavía."
+            f"{OI_ENRICH_TOP_N}. Vol 24h = volumen negociado en 24h en cada pierna — a diferencia del "
+            "OI (cuánto hay abierto ahora), dice cuánto se ha estado moviendo; un mercado con OI "
+            "decente pero volumen bajo probablemente tenga más slippage del que el OI por sí solo "
+            "sugiere. No todos los exchanges lo exponen en su fetch masivo, así que puede salir en "
+            "blanco incluso fuera del top. «—» = sin dato disponible."
         )
 
 with tab_matrix:

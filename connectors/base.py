@@ -33,6 +33,7 @@ class FundingRate:
     mark_price: Optional[float] = None
     next_funding_time: Optional[datetime] = None
     open_interest_usd: Optional[float] = None
+    volume_24h_usd: Optional[float] = None
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:

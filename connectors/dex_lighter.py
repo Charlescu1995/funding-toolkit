@@ -36,6 +36,21 @@ normalizan a un periodo común). Verificado en vivo contra la propia UI de
 Lighter: para BTC la UI mostraba "1HR FUNDING: +0.0012%" mientras que
 /funding-rates devolvía 0.0096% — exactamente 8 veces más. Ver
 INTERVAL_HOURS más abajo.
+
+--- Nota sobre volumen 24h (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
+
+El mismo `orderBookDetails` que ya se usa para mark price y open interest
+trae, por mercado, DOS campos de volumen de 24h: `daily_base_token_volume`
+(ej. BTC: 11497.75528, en unidades del activo base) y
+`daily_quote_token_volume` (ej. BTC: 880251817.335129, en la moneda de
+cotización — USDC en Lighter). `daily_quote_token_volume` ya es el notional
+en USD, así que se usa DIRECTAMENTE, sin multiplicar por mark price — mismo
+patrón que `daily_quote_token_volume`/`daily_base_token_volume` frente a
+`turnoverOf24h`/`volumeOf24h` en KuCoin (ver connectors/cex_kucoin.py). Se
+lee del mismo `depth_rows` que ya se recorre para mark price/OI, sin
+ninguna llamada de red adicional.
+
+    volume_24h_usd = daily_quote_token_volume   (directo, sin conversión)
 """
 
 from __future__ import annotations
@@ -90,8 +105,8 @@ class LighterConnector:
         depth_payload = depth_resp.json()
         depth_rows = depth_payload.get("order_book_details", [])
 
-        # market_id -> (mark_price, open_interest en unidades base)
-        depth_by_market: dict[int, tuple[float | None, float | None]] = {}
+        # market_id -> (mark_price, open_interest en unidades base, volumen 24h en USD)
+        depth_by_market: dict[int, tuple[float | None, float | None, float | None]] = {}
         for row in depth_rows:
             market_id = row.get("market_id")
             if market_id is None:
@@ -99,7 +114,15 @@ class LighterConnector:
             mark_price_raw = row.get("mark_price")
             mark_price = float(mark_price_raw) if mark_price_raw is not None else None
             open_interest = row.get("open_interest")
-            depth_by_market[market_id] = (mark_price, open_interest)
+            # Ver docstring: daily_quote_token_volume ya viene en USD, sin conversión.
+            volume_24h_raw = row.get("daily_quote_token_volume")
+            volume_24h_usd = None
+            if volume_24h_raw is not None:
+                try:
+                    volume_24h_usd = float(volume_24h_raw)
+                except (TypeError, ValueError):
+                    volume_24h_usd = None
+            depth_by_market[market_id] = (mark_price, open_interest, volume_24h_usd)
 
         # /api/v1/funding-rates es, en realidad, un endpoint de COMPARACIÓN:
         # trae, para un universo amplio de símbolos, la tasa de varios
@@ -132,7 +155,9 @@ class LighterConnector:
             if symbol is None or rate is None:
                 continue
 
-            mark_price, open_interest_base = depth_by_market.get(market_id, (None, None))
+            mark_price, open_interest_base, volume_24h_usd = depth_by_market.get(
+                market_id, (None, None, None)
+            )
             oi_usd = None
             if open_interest_base is not None and mark_price is not None:
                 try:
@@ -151,6 +176,7 @@ class LighterConnector:
                     mark_price=mark_price,
                     next_funding_time=None,
                     open_interest_usd=oi_usd,
+                    volume_24h_usd=volume_24h_usd,
                 )
             )
 

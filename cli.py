@@ -106,7 +106,10 @@ def render_opportunities(rates: list[NormalizedRate]) -> None:
     table.add_column("Consistency\n(30d)", justify="right")
     table.add_column("OI long", justify="right")
     table.add_column("OI short", justify="right")
-    table.add_column("Cuello de botella", justify="right")
+    table.add_column("Cuello de botella OI", justify="right")
+    table.add_column("Vol 24h long", justify="right")
+    table.add_column("Vol 24h short", justify="right")
+    table.add_column("Cuello de botella Vol", justify="right")
 
     for opp in opportunities:
         if opp.consistency_pct is None:
@@ -118,6 +121,10 @@ def render_opportunities(rates: list[NormalizedRate]) -> None:
         bottleneck_cell = _fmt_usd(opp.oi_bottleneck_usd)
         if opp.oi_bottleneck_side:
             bottleneck_cell += f" [dim]({opp.oi_bottleneck_side})[/dim]"
+
+        volume_bottleneck_cell = _fmt_usd(opp.volume_bottleneck_usd)
+        if opp.volume_bottleneck_side:
+            volume_bottleneck_cell += f" [dim]({opp.volume_bottleneck_side})[/dim]"
 
         if opp.price_spread_pct is None:
             pspread_cell = "[dim]s/d[/dim]"
@@ -137,6 +144,9 @@ def render_opportunities(rates: list[NormalizedRate]) -> None:
             _fmt_usd(opp.oi_long_usd),
             _fmt_usd(opp.oi_short_usd),
             bottleneck_cell,
+            _fmt_usd(opp.volume_long_usd),
+            _fmt_usd(opp.volume_short_usd),
+            volume_bottleneck_cell,
         )
 
     conn.close()

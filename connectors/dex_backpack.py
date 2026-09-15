@@ -69,6 +69,39 @@ A diferencia de RiseX (que había que recortar "BTC/USDC" a mano) o Aster,
 aquí `/api/v1/markets` ya trae un campo `baseSymbol` limpio (ej. "BTC" para
 "BTC_USDC_PERP") — se usa directamente, sin necesidad de heurísticas de
 recorte.
+
+--- Nota sobre volumen 24h (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
+
+Ninguno de los tres endpoints que ya usaba este conector (`/api/v1/markets`,
+`/api/v1/markPrices`, `/api/v1/openInterest`) trae ningún campo de volumen —
+confirmado en vivo pidiendo explícitamente las claves completas de cada uno
+para BTC_USDC_PERP (markPrices solo trae fundingRate/indexPrice/markPrice/
+nextFundingTimestamp/symbol; openInterest solo trae openInterest/symbol/
+timestamp; markets solo trae metadata de configuración del contrato, sin
+ninguna métrica de actividad). Backpack sí expone un cuarto endpoint bulk que
+no se estaba usando, `GET /api/v1/tickers` (estadísticas de 24h, TODOS los
+símbolos de golpe, sin parámetro de símbolo, mismo patrón "bulk sin pool de
+hilos" que el resto del conector), y por eso se añade esta cuarta llamada.
+Ejemplo real confirmado en vivo (BTC_USDC_PERP):
+
+    {
+      "symbol": "BTC_USDC_PERP", "lastPrice": "75496.1", "firstPrice": "78299.4",
+      "high": "78299.4", "low": "74855.4", "priceChange": "-2803.3",
+      "priceChangePercent": "-0.035802", "trades": "42960",
+      "volume": "2579.15533", "quoteVolume": "197267580.453348"
+    }
+
+`volume` viene en unidades del activo base (BTC) y `quoteVolume` en la moneda
+de cotización del mercado (USDC para todos los perp de Backpack, que este
+proyecto trata como equivalente a USD, igual que USDT en el resto de
+conectores). Se comprueba por consistencia interna: volume × markPrice
+(2579.15533 × 75491.6 ≈ $194.76M) da un notional del mismo orden de magnitud
+que quoteVolume (≈$197.27M) — la pequeña diferencia es normal porque el
+precio se mueve a lo largo del día. Por tanto se usa `quoteVolume`
+directamente, sin conversión, igual que `turnoverOf24h` en KuCoin o
+`amount24` en MEXC:
+
+    volume_24h_usd = quoteVolume   (directo, sin conversión)
 """
 
 from __future__ import annotations
@@ -85,6 +118,7 @@ BASE_URL = "https://api.backpack.exchange"
 MARKETS_URL = f"{BASE_URL}/api/v1/markets"
 MARK_PRICES_URL = f"{BASE_URL}/api/v1/markPrices"
 OPEN_INTEREST_URL = f"{BASE_URL}/api/v1/openInterest"
+TICKERS_URL = f"{BASE_URL}/api/v1/tickers"
 
 MS_PER_HOUR = 1000.0 * 3600.0
 
@@ -134,6 +168,17 @@ class BackpackConnector:
         oi_by_symbol = {
             row["symbol"]: row.get("openInterest")
             for row in oi_raw
+            if isinstance(row, dict) and row.get("symbol")
+        }
+
+        tickers_resp = self._session.get(TICKERS_URL, timeout=self._timeout)
+        tickers_resp.raise_for_status()
+        tickers_raw = tickers_resp.json()
+        # Ver docstring: quoteVolume ya viene en la moneda de cotización
+        # (USDC), tratada como USD igual que USDT en el resto del proyecto.
+        volume_24h_by_symbol = {
+            row["symbol"]: row.get("quoteVolume")
+            for row in tickers_raw
             if isinstance(row, dict) and row.get("symbol")
         }
 
@@ -188,6 +233,15 @@ class BackpackConnector:
 
             base_symbol = market.get("baseSymbol") or symbol
 
+            volume_24h_raw = volume_24h_by_symbol.get(symbol)
+            volume_24h_usd = None
+            if volume_24h_raw is not None:
+                try:
+                    # Ver docstring: quoteVolume ya viene en USD, sin conversión.
+                    volume_24h_usd = float(volume_24h_raw)
+                except (TypeError, ValueError):
+                    volume_24h_usd = None
+
             out.append(
                 FundingRate(
                     exchange="backpack",
@@ -199,6 +253,7 @@ class BackpackConnector:
                     mark_price=mark_price,
                     next_funding_time=None,
                     open_interest_usd=open_interest_usd,
+                    volume_24h_usd=volume_24h_usd,
                 )
             )
 

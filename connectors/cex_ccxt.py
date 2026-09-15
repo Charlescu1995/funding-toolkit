@@ -100,6 +100,35 @@ class CexConnector:
         # usamos para descartar símbolos "fantasma" (ver más abajo).
         known_markets = self._client.markets
 
+        # Volumen 24h (Paso 6, punto 2): fetch_funding_rates() de ccxt NO trae
+        # volumen (solo campos de funding: tasa, mark price, próximo pago) —
+        # hace falta una segunda llamada bulk a fetch_tickers(), que sí expone
+        # `quoteVolume` (volumen de 24h en la moneda de cotización, USDT en
+        # todos los mercados de este proyecto → ya es USD) de forma unificada
+        # en ccxt para prácticamente cualquier exchange soportado. Es una
+        # llamada bulk (todos los símbolos de golpe), no símbolo a símbolo, así
+        # que no pesa nada extra en el rate limit comparado con el fetch
+        # principal. Se trata como opcional a propósito (try/except): si un
+        # exchange no soporta fetch_tickers() en bulk para derivados, o falla
+        # por cualquier motivo, se pierde el volumen para ese exchange pero NO
+        # se tira el resto del fetch — el funding rate (el dato principal) ya
+        # se obtuvo arriba y no depende de esto.
+        volume_by_symbol: dict[str, float] = {}
+        try:
+            tickers = self._client.fetch_tickers()
+            for market_symbol, ticker in tickers.items():
+                quote_volume = ticker.get("quoteVolume")
+                if quote_volume is not None:
+                    volume_by_symbol[market_symbol] = float(quote_volume)
+        except Exception as exc:
+            logger.warning(
+                "%s: no se pudo obtener volumen 24h vía fetch_tickers() (%s: %s) — se sigue "
+                "sin volumen para este exchange, el resto del fetch no se ve afectado",
+                self.ccxt_id,
+                type(exc).__name__,
+                exc,
+            )
+
         interval_default = DEFAULT_INTERVAL_HOURS.get(self.ccxt_id, 8)
         out: list[FundingRate] = []
         ghost_symbols: list[str] = []
@@ -147,6 +176,7 @@ class CexConnector:
                     mark_price=entry.get("markPrice"),
                     next_funding_time=next_funding,
                     open_interest_usd=None,  # ccxt no lo trae en fetch_funding_rates; se añade en Paso 5
+                    volume_24h_usd=volume_by_symbol.get(market_symbol),
                 )
             )
 

@@ -10,6 +10,18 @@ Nota sobre unidades: `open_interest` no está documentado explícitamente como
 USD o como unidades del activo base. Se trata como unidades base (igual que
 Hyperliquid/Lighter/Paradex) y se convierte a USD con el mark price — es la
 convención más común; revisar si al desplegar los números salen desproporcionados.
+
+--- Nota sobre `volume_24h` (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
+
+El mismo objeto de `/prices` trae directamente `volume_24h` (ej. BTC en vivo:
+"371703340.84866", junto a mark="75593"). A diferencia de `open_interest`
+(sin unidad documentada, tratado como activo base — ver nota de arriba), la
+magnitud de `volume_24h` para BTC (~$371.7M) solo es plausible como notional
+en USD, no como cantidad de BTC (371,703,340 BTC no existen ni de lejos) —
+así que, al contrario que `open_interest`, se usa DIRECTAMENTE sin
+multiplicar por el mark price:
+
+    volume_24h_usd = float(volume_24h)   (directo, sin conversión)
 """
 
 from __future__ import annotations
@@ -68,6 +80,15 @@ class PacificaConnector:
                 except (TypeError, ValueError):
                     oi_usd = None
 
+            # Ver docstring: volume_24h ya viene en USD, sin conversión.
+            volume_24h_raw = row.get("volume_24h")
+            volume_24h_usd = None
+            if volume_24h_raw is not None:
+                try:
+                    volume_24h_usd = float(volume_24h_raw)
+                except (TypeError, ValueError):
+                    volume_24h_usd = None
+
             out.append(
                 FundingRate(
                     exchange="pacifica",
@@ -79,6 +100,7 @@ class PacificaConnector:
                     mark_price=mark_price,
                     next_funding_time=None,
                     open_interest_usd=oi_usd,
+                    volume_24h_usd=volume_24h_usd,
                 )
             )
 

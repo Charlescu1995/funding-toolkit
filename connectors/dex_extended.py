@@ -10,6 +10,17 @@ Nota sobre unidades: a diferencia de Hyperliquid/Lighter/Paradex, Extended
 documenta explícitamente DOS campos de open interest — `openInterest` (en el
 activo de colateral, es decir ya en USD) y `openInterestBase` (en el activo
 base). Usamos `openInterest` directamente, sin multiplicar por mark price.
+
+--- Nota sobre volumen 24h (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
+
+El mismo `marketStats` sigue el mismo patrón que con open interest: trae DOS
+campos de volumen de 24h — `dailyVolume` (ej. XRP-USD en vivo:
+"35071518.026000", en el activo de colateral, es decir ya en USD) y
+`dailyVolumeBase` (ej. XRP-USD: "25462558", en el activo base). Igual que con
+`openInterest`, se usa `dailyVolume` DIRECTAMENTE, sin multiplicar por mark
+price:
+
+    volume_24h_usd = dailyVolume   (directo, sin conversión)
 """
 
 from __future__ import annotations
@@ -61,6 +72,11 @@ class ExtendedConnector:
             oi_raw = stats.get("openInterest")  # ya en USD (activo de colateral)
             oi_usd = float(oi_raw) if oi_raw is not None else None
 
+            # Ver docstring: dailyVolume ya viene en USD (activo de colateral),
+            # igual patrón que openInterest — sin conversión.
+            volume_24h_raw = stats.get("dailyVolume")
+            volume_24h_usd = float(volume_24h_raw) if volume_24h_raw is not None else None
+
             out.append(
                 FundingRate(
                     exchange="extended",
@@ -72,6 +88,7 @@ class ExtendedConnector:
                     mark_price=mark_price,
                     next_funding_time=None,
                     open_interest_usd=oi_usd,
+                    volume_24h_usd=volume_24h_usd,
                 )
             )
 

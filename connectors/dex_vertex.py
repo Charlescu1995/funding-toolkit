@@ -100,6 +100,35 @@ si `all_products` trae algún campo `risk`/`book_info` con el estado real
 El campo `symbol` de `type=symbols` se asume con el mismo formato que Nado
 heredó de Vertex (ej. "BTC-PERP") — no se ha podido confirmar en vivo. Se
 recorta el sufijo "-PERP" si está presente, igual que en dex_nado.py.
+
+--- Nota sobre volumen 24h: hueco conocido ---
+
+Sigue sin poder confirmarse contra tráfico real: al intentar esta tarea se
+volvió a probar tanto `GET` directo (curl, bloqueado por el proxy de red de
+este entorno con 403 en el CONNECT, confirmado vía `/__agentproxy/status`)
+como WebFetch contra `gateway.prod.vertexprotocol.com` y
+`archive.prod.vertexprotocol.com` — ambos fallan igual
+(`robots.txt fetch failed: ConnectError`), el mismo bloqueo total descrito
+arriba para el resto de este conector. Lo que SÍ fue alcanzable vía WebFetch
+es la documentación pública en `docs.vertexprotocol.com` (host distinto, sin
+bloquear), que describe la forma completa de la respuesta de
+`market_snapshots` (endpoint que este conector ya usa para funding/OI, ver
+arriba): sí trae un campo de volumen, `cumulative_volumes` (mapa
+product_id → volumen en USDC), pero la propia documentación lo describe como
+ACUMULADO desde el origen del producto, no una ventana de 24h — a diferencia
+de `turnoverOf24h`/`turnover24h` en KuCoin/ApeX, no sirve tal cual como
+"volumen negociado en 24h". Obtener un volumen de 24h real exigiría pedir
+DOS snapshots (uno actual y otro de hace ~24h, cambiando `interval.count` a
+2 y ajustando `granularity`) y restar `cumulative_volumes` entre ambos —
+eso es cambiar la FORMA de una petición que hoy se sabe que funciona para
+funding/OI, no solo leer un campo adicional, y no hay forma de probarlo sin
+acceso real a la API. Por el mismo criterio de prudencia que el resto de
+asunciones no confirmadas de este archivo (ver `open_interests` y el filtro
+de mercados, arriba), se deja `volume_24h_usd=None` en vez de inventar esa
+resta sin poder contrastarla. Si Vertex se vuelve alcanzable desde este
+entorno en el futuro, el primer paso sería probar ese diff de dos snapshots
+contra un producto conocido y contrastarlo con el volumen que muestra la UI
+pública de Vertex.
 """
 
 from __future__ import annotations
@@ -277,6 +306,10 @@ class VertexConnector:
                     mark_price=mark_price_by_id.get(pid),
                     next_funding_time=None,
                     open_interest_usd=open_interest_usd,
+                    # Ver docstring: no hay campo de volumen 24h confirmable
+                    # (cumulative_volumes es acumulado, no una ventana 24h) —
+                    # hueco conocido, no se inventa el valor.
+                    volume_24h_usd=None,
                 )
             )
 

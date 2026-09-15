@@ -87,6 +87,27 @@ STORJ mostraba $43.76K de Open Interest total, mientras que el ranking de
 esta herramienta mostraba $22,117 en el lado "long" — aproximadamente la
 mitad, coherente con un OI total repartido entre long y short. Confirma que
 `open_interest` ya viene en USD, sin necesidad de multiplicar por mark_price.
+
+--- Nota sobre volumen 24h (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
+
+Cada listing trae, al mismo nivel que `funding_rate` y `open_interest`, un
+campo `volume_24h` como string. Confirmado en vivo (WebFetch directo contra
+`/metadata/stats`, el mismo endpoint que ya se usa para todo lo demás — sin
+llamada extra), ejemplo real BTC:
+
+    mark_price = "75631.4366664501"
+    volume_24h = "363526581.965464"
+
+Igual que con `open_interest` (ver nota de arriba), interpretar 363.5
+millones como CANTIDAD DE BTC no es físicamente plausible (el supply total
+de BTC ronda los 19.5 millones) — como notional en USD, en cambio, es una
+cifra normal para un mercado grande (del mismo orden que el resto de
+volúmenes de 24h vistos en los otros exchanges de este proyecto). Por tanto
+se asume que `volume_24h`, igual que `open_interest`, ya viene EN USD
+(moneda de cotización) y se usa DIRECTAMENTE, sin multiplicar por
+mark_price:
+
+    volume_24h_usd = float(volume_24h)   (directo, sin conversión)
 """
 
 from __future__ import annotations
@@ -167,6 +188,16 @@ class VariationalConnector:
                 except (TypeError, ValueError):
                     open_interest_usd = None
 
+            # Ver docstring: volume_24h ya viene en USD (moneda de cotización),
+            # igual que open_interest — mismo razonamiento de plausibilidad.
+            volume_24h_raw = row.get("volume_24h")
+            volume_24h_usd = None
+            if volume_24h_raw is not None:
+                try:
+                    volume_24h_usd = float(volume_24h_raw)
+                except (TypeError, ValueError):
+                    volume_24h_usd = None
+
             out.append(
                 FundingRate(
                     exchange="variational",
@@ -178,6 +209,7 @@ class VariationalConnector:
                     mark_price=mark_price,
                     next_funding_time=None,
                     open_interest_usd=open_interest_usd,
+                    volume_24h_usd=volume_24h_usd,
                 )
             )
 

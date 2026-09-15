@@ -15,7 +15,8 @@ Cuatro endpoints públicos, todos bulk (sin pool de hilos), cruzados por
     GET https://api.hbdm.com/linear-swap-api/v1/swap_open_interest
         -> open interest YA EN USD (campo "value"), por contrato
     GET https://api.hbdm.com/linear-swap-ex/market/detail/batch_merged
-        -> "close" (último precio negociado), usado como proxy de mark price
+        -> "close" (último precio negociado, proxy de mark price) y
+           "trade_turnover" (volumen de 24h ya en USD)
 
 Todo comprobado en vivo (WebFetch directo — ver nota de entorno en
 connectors/cex_kucoin.py: estos hosts están bloqueados por la política de
@@ -80,6 +81,16 @@ hueco solo afecta al campo informativo `mark_price`, no al cálculo de OI.
 
 Solo se ha observado `1` en el contrato de mayor volumen consultado (BTC-USDT)
 — se acepta únicamente ese valor exacto.
+
+--- Nota sobre `trade_turnover` (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
+
+El mismo ticker (`batch_merged`) que ya se usa para `close` trae también
+`vol` (8200930, en unidades del activo base — igual patrón que `volume`/
+`amount` en swap_open_interest) y `trade_turnover` ("627183950.073",
+STRING). `trade_turnover` ya es el volumen de 24h en USD directamente — no
+hace falta multiplicar por nada, igual que `value` para el open interest. Se
+lee del mismo `ticker_rows` que ya se recorre para `close`, sin ninguna
+llamada de red adicional.
 """
 
 from __future__ import annotations
@@ -171,6 +182,12 @@ class HtxConnector:
             for row in ticker_rows
             if isinstance(row, dict) and row.get("contract_code")
         }
+        # Ver docstring: trade_turnover ya viene en USD, no hace falta convertir.
+        turnover_by_code = {
+            row["contract_code"]: row.get("trade_turnover")
+            for row in ticker_rows
+            if isinstance(row, dict) and row.get("contract_code")
+        }
 
         out: list[FundingRate] = []
         skipped: dict[str, str] = {}
@@ -214,6 +231,15 @@ class HtxConnector:
                 except (TypeError, ValueError):
                     open_interest_usd = None
 
+            turnover_raw = turnover_by_code.get(code)
+            volume_24h_usd = None
+            if turnover_raw is not None:
+                try:
+                    # Ver docstring: trade_turnover ya viene en USD, sin conversión.
+                    volume_24h_usd = float(turnover_raw)
+                except (TypeError, ValueError):
+                    volume_24h_usd = None
+
             out.append(
                 FundingRate(
                     exchange="htx",
@@ -225,6 +251,7 @@ class HtxConnector:
                     mark_price=mark_price,
                     next_funding_time=None,
                     open_interest_usd=open_interest_usd,
+                    volume_24h_usd=volume_24h_usd,
                 )
             )
 

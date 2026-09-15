@@ -93,6 +93,38 @@ endpoint dedicado `/market/data/open-interest?symbol=BTC/USDT-P` — un OI de
 `markPrice` para obtener el USD.
 
     open_interest_usd = openInterestQuantity × markPrice
+
+--- Nota sobre volumen 24h: hueco conocido, no disponible en bulk ---
+
+`/market/inventory` (el único endpoint bulk que usa este conector) NO trae
+ningún campo de volumen — confirmado por dos vías independientes, ya que el
+dominio `data-api.hibachi.xyz` está bloqueado tanto para curl directo (403
+del proxy de egress de este sandbox) como para WebFetch (todo el dominio está
+vedado por su propio `robots.txt`, a diferencia de KuCoin/MEXC/HTX/Backpack/
+Nado, donde WebFetch sí pudo consultar la API en vivo):
+
+1. El SDK oficial (`hibachi-xyz` en PyPI, inspeccionado leyendo su código
+   fuente real descargado del paquete, no solo la doc): la clase
+   `InventoryResponse` -> `Market` -> `MarketInfo` (en `hibachi_xyz/types.py`)
+   no declara ningún campo de volumen. El único campo de volumen del SDK,
+   `StatsResponse.volume24h`, se mapea al método `get_stats(self, symbol)`,
+   que llama a `GET /market/data/stats?symbol=X` — endpoint POR SÍMBOLO, no
+   bulk (`hibachi_xyz/api.py`, línea ~585).
+
+2. ccxt (que sí tiene un módulo `hibachi.py`, confirmado con
+   `'hibachi' in ccxt.exchanges`) corrobora lo mismo desde el lado
+   independiente de otro equipo: declara explícitamente
+   `has['fetchTickers'] = False` (sin endpoint de tickers bulk) y
+   `has['fetchTicker'] = True`, y su `fetch_ticker(symbol)` combina DOS
+   llamadas por símbolo (`/market/data/prices` + `/market/data/stats`) para
+   construir el volumen — exactamente el mismo patrón por-símbolo que el SDK
+   oficial.
+
+Como la regla del proyecto es "bulk, sin pool de hilos por símbolo" y aquí no
+existe ningún endpoint bulk con volumen, se deja `volume_24h_usd=None` para
+todos los mercados de Hibachi en vez de inventar un valor o añadir peticiones
+símbolo a símbolo — mismo criterio que el hueco ya documentado para
+`mark_price` en HTX (ver connectors/cex_htx.py).
 """
 
 from __future__ import annotations
@@ -196,6 +228,8 @@ class HibachiConnector:
                     mark_price=mark_price,
                     next_funding_time=None,
                     open_interest_usd=open_interest_usd,
+                    # Ver docstring: hueco conocido, sin dato bulk disponible.
+                    volume_24h_usd=None,
                 )
             )
 

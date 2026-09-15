@@ -11,7 +11,7 @@ Vamos construyéndola paso a paso. Progreso:
 - [x] Paso 2 — Conectores de datos: 8 CEX (Binance, Bybit, OKX, Bitget, Gate vía ccxt; KuCoin/MEXC/HTX con conector propio — ccxt no soporta `fetchFundingRates()` para estos tres, ver sexta tanda más abajo) + 15 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational, RiseX, Backpack, Nado, Hibachi, Vertex y ApeX vía API directa/ccxt) — los 13 primeros DEX confirmados devolviendo datos reales en producción (Variational: 547 pares, RiseX: 30 pares tras dos rondas de fix, Backpack/Nado/Hibachi sin ningún error en su primer despliegue real, ver más abajo); Vertex y ApeX son la quinta tanda — ApeX confirmado en vivo, Vertex construido solo a partir de documentación (no se pudo alcanzar su API desde este entorno) y CONFIRMADO en producción bloqueado por red (mismo patrón que Binance/Bybit — ver sección dedicada). Se investigó también Drift Protocol y se descartó: su API quedó inutilizable tras el hackeo de ~$285-295M de abril 2026 y sus dominios oficiales redirigen a un fork no oficial ("Velocity Exchange") que no es Drift — ver sección dedicada
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
-- [x] Paso 5 — Consistency Score, OI Depth y Price Spread (con fallback contratos×mark_price para exchanges que no dan el USD directo; ver séptima tanda para Price Spread)
+- [x] Paso 5 — Consistency Score, OI Depth, Price Spread y Volume 24h (con fallback contratos×mark_price para exchanges que no dan el USD directo; ver séptima tanda para Price Spread y octava tanda para Volume 24h)
 - [x] Paso 6 — Vista ranking + vista matriz (CLI), con filtros por venue/exchange
 - [x] Paso 9 — Interfaz Streamlit (Home + página Funding Rates: Ranking / Matriz / Histórico), desplegada en Streamlit Cloud
 - [ ] Paso 7 — Alertas por Telegram (pendiente, a petición tuya)
@@ -674,6 +674,134 @@ momento Price Spread es solo informativo, una columna más a mirar. Si en la
 práctica conviene descartar o avisar más fuerte cuando el Price Spread sale
 muy alto, es un cambio pequeño a partir de aquí — pero no se ha hecho porque
 no se pidió.
+
+### Volume 24h, octava tanda (comparativa con Kusi/Smartbitrage, punto 2)
+
+Segunda mitad del Punto 2 de la comparativa (la primera, Open Interest, ya
+estaba resuelta desde el Paso 5). El Open Interest dice cuánto hay abierto
+AHORA MISMO en cada pierna; el volumen de 24h dice cuánto se ha estado
+MOVIENDO — un mercado puede tener buen OI pero estar prácticamente
+congelado, lo que en la práctica significa más slippage del que el OI por sí
+solo sugeriría. Son señales complementarias, por eso se muestran las dos por
+separado (ver `core/scoring.py::volume_depth()`, mismo patrón que
+`oi_depth()`).
+
+A diferencia de OI Depth (que deliberadamente solo se pide para el top 10
+del ranking, con una llamada aparte, para no reventar el rate limit — ver
+Paso 5), aquí se decidió ir a por la opción completa: volumen para TODAS las
+oportunidades, no solo el top 10, leyendo el campo directamente del mismo
+fetch masivo que ya se hace (o, como mucho, una única llamada bulk
+adicional) en cada uno de los 23 conectores. Esto significa tocar cada
+conector individualmente en vez de un mecanismo genérico — más trabajo, pero
+disponible para todo el ranking desde el primer render, no solo tras
+enriquecer el top 10.
+
+**Nuevo campo de punta a punta**: `FundingRate.volume_24h_usd` →
+`NormalizedRate.volume_24h_usd` → `OpportunityRow.volume_long_usd` /
+`volume_short_usd` / `volume_bottleneck_usd` / `volume_bottleneck_side`.
+Nuevas columnas "Vol 24h long/short" y "Cuello de botella Vol" en la tabla
+de Ranking (Streamlit y CLI), junto a las de OI. Regla seguida en los 23
+conectores, sin excepción: si el campo no viene ya en USD/USDT/USDC en el
+mismo payload que el conector ya consulta, se documenta el hueco y se deja
+`None` — nunca se añadió una llamada símbolo a símbolo solo para conseguir
+volumen (eso sí se acepta, en cambio, para OI Depth, pero ahí el propio
+diseño ya lo limita al top 10).
+
+**CEX vía ccxt (Binance, Bybit, OKX, Bitget, Gate, Aster)**: una segunda
+llamada bulk `fetch_tickers()` (unificada por ccxt, todos los símbolos de
+golpe), leyendo `quoteVolume` — campo estándar de ccxt, no hace falta
+investigar por exchange como con las APIs propias. Si `fetch_tickers()`
+falla para algún exchange, se captura y se sigue sin volumen para ese
+exchange (no tira el fetch principal, que es el dato crítico).
+
+**KuCoin, MEXC, HTX (conector propio)**: los tres ya traían el volumen de
+24h en el mismo endpoint que se usa para todo lo demás, sin llamada extra:
+KuCoin `turnoverOf24h` (confirmado en vivo, ej. XBTUSDTM ≈$370.1M, ya en
+USDT), MEXC `amount24` (confirmado en vivo por consistencia interna:
+`volume24 × contractSize × fairPrice ≈ amount24`, ambos ≈$4.25-4.27B para
+BTC_USDT), HTX `trade_turnover` (confirmado en vivo, mismo ticker que ya se
+usa para el mark price proxy, ej. BTC-USDT ≈$627.2M).
+
+**DEX — campo confirmado en vivo, usado directo (ya en USD/quote)**:
+Lighter (`daily_quote_token_volume`, BTC ≈$880.3M), Extended
+(`marketStats.dailyVolume`, XRP ≈$35.1M), Pacifica (`volume_24h`, BTC
+≈$371.7M — se trata como ya-en-USD porque como unidades de BTC no tendría
+sentido de magnitud), Variational (`volume_24h` en `/metadata/stats`, BTC
+≈$363.5M, mismo razonamiento de magnitud que ya se aplica a su
+open_interest), Nado (`quote_volume` del mismo objeto que ya se usaba, BTC
+≈$230.9M en USDT0), Backpack (`quoteVolume`, nuevo endpoint bulk
+`GET /api/v1/tickers` — es el único de este grupo que sí necesitó una
+llamada extra, porque ninguno de los tres endpoints que ya usaba traía
+volumen; BTC_USDC_PERP ≈$197.3M), ApeX (`turnover24h`, mismo ticker por
+símbolo que ya se pedía — ojo, ver nota de fiabilidad más abajo).
+
+**DEX — campo encontrado pero solo confirmado contra documentación, no
+contra una respuesta JSON real** (incidencia común a los tres: el endpoint
+en cuestión es POST-only o no se pudo aislar un ejemplo completo vía
+WebFetch — se deja igualmente activado porque el nombre/unidad del campo sí
+está documentado oficialmente, pero es el primer sitio a mirar si algún
+volumen sale con una magnitud rara en producción):
+- Hyperliquid: `dayNtlVlm` (documentado como "24-hour notional volume in
+  USD"; su endpoint es POST-only, WebFetch no pudo repetir la llamada en
+  vivo símbolo a símbolo como con el resto de campos de este conector).
+- GRVT: `buy_volume_24h_q + sell_volume_24h_q`, dividido por `PRICE_SCALE`
+  (1e9) — mismo patrón de escala que ya usa `open_interest` en este
+  conector. El endpoint real da 405 (POST-only); el JSON de ejemplo de la
+  documentación oficial es un placeholder, así que la escala ÷1e9 es una
+  asunción razonada, no una cifra contrastada.
+- RiseX: `quote_volume_24h`, confirmado solo contra el schema OpenAPI
+  oficial — `api.rise.trade` dio 403 tanto por curl como por WebFetch. Dado
+  el historial de este conector (dos rondas de bugs reales donde la
+  documentación no coincidía con la respuesta real, ver quinta tanda), este
+  campo concreto es el primer sospechoso si el volumen de RiseX sale raro.
+- Paradex: `volume_24h` existe, pero no se pudo confirmar si ya viene en USD
+  o en el activo base (el único ejemplo completo en vivo fue SUI, no BTC).
+  Se aplicó el mismo criterio que ya usa `open_interest` en este conector
+  (tratar como activo base, multiplicar por mark_price) por consistencia,
+  dejando la incertidumbre documentada explícitamente en el docstring.
+
+**DEX — hueco conocido, sin volumen disponible sin romper el patrón "bulk,
+sin llamadas por símbolo"** (`volume_24h_usd=None`, documentado igual que ya
+se documenta la falta de mark_price dedicado en HTX):
+- edgeX: ni `getLatestFundingRate` ni `getMetaData` (los dos endpoints que
+  usa el conector) traen volumen; el único endpoint que sí lo tiene
+  (`getTicker`) es el mismo que este conector ya había descartado antes por
+  devolver siempre `"data": []` — reconfirmado hoy, sigue vacío.
+- Hibachi: verificado por dos vías independientes (SDK oficial `hibachi-xyz`
+  y el módulo `hibachi` de ccxt) que el único campo de volumen sale de un
+  endpoint por símbolo, no bulk — se respeta la regla del proyecto de no
+  añadir peticiones símbolo a símbolo solo para esto.
+- Vertex: sigue totalmente inalcanzable desde este entorno (mismo bloqueo de
+  red que el resto de datos de Vertex, ver quinta tanda). Su documentación
+  solo describe un volumen ACUMULADO desde el origen del producto, no una
+  ventana de 24h — calcular una ventana real exigiría pedir dos snapshots y
+  restar, un cambio no verificable sin acceso real, así que se dejó el hueco
+  en vez de inventar el cálculo.
+
+**Nota de fiabilidad sobre ApeX** (`turnover24h`): al investigar, WebFetch
+devolvió el mismo objeto para tres símbolos distintos pedidos por separado
+(`BTCUSDT`, `DOGEUSDT`, `ETHUSDT`) — probablemente una caché de WebFetch que
+ignora la query string, no algo confirmable de otra forma sin acceso directo
+al host (bloqueado en este sandbox). El payload es internamente consistente
+(`turnover24h / volume24h` cae dentro del rango `[lowPrice24h, highPrice24h]`
+del mismo objeto) y reutiliza campos ya confirmados en vivo en tandas
+anteriores (`fundingRate`, `markPrice`, `openInterest`), así que se aceptó
+como confirmación suficiente del nombre/unidad del campo — pero el valor
+exacto para un símbolo concreto no quedó verificado en ese instante.
+
+Probado: `core/scoring.py::volume_depth()` con datos sintéticos (caso
+normal, una pierna sin dato → bottleneck `None` sin inventar), y
+`compute_opportunities()` de punta a punta. Además, pipeline completo
+verificado en modo Demo/offline (`core/data_service.py::fetch_normalized_rates(offline=True)`)
+con volumen añadido a los tres fixtures existentes
+(`tests/fixtures/*_funding.json`), confirmando que el campo llega intacto
+hasta `OpportunityRow` sin tocar ningún conector en vivo.
+
+**Pendiente de confirmar contra el primer despliegue real**, mismo criterio
+que el resto de datos de este proyecto: los campos marcados arriba como
+"solo contra documentación" o con nota de fiabilidad (Hyperliquid, GRVT,
+RiseX, Paradex, ApeX) son los primeros a revisar si algún volumen sale con
+una magnitud claramente disparatada en producción.
 
 ## Importante sobre dónde correr esto
 

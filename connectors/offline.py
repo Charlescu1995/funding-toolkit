@@ -41,6 +41,7 @@ class OfflineConnector:
                 interval_hours=r["interval_hours"],
                 mark_price=r.get("mark_price"),
                 open_interest_usd=r.get("open_interest_usd"),
+                volume_24h_usd=r.get("volume_24h_usd"),
             )
             for r in records
         ]

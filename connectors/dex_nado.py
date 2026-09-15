@@ -90,6 +90,23 @@ enseña la web oficial de Nado, este es el sitio a revisar primero.
 A diferencia de Backpack/RiseX (que solo dan el OI en activo base y hay que
 multiplicar por mark price a mano), aquí `/archive/v2/contracts` YA trae
 `open_interest_usd` precalculado — se usa directamente, sin conversión.
+
+--- Nota sobre volumen 24h (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
+
+El mismo objeto de `/archive/v2/contracts` que ya se usa para todo lo demás
+trae también, junto a `open_interest`/`open_interest_usd`, dos campos de
+volumen de 24h: `base_volume` y `quote_volume`. Ejemplo real (BTC-PERP_USDT0):
+
+    "base_volume": 3015.95925, "quote_volume": 230868794.13825437
+
+`base_volume` viene en unidades del activo base (BTC) y `quote_volume` en la
+moneda de cotización del contrato (USDT0 — un stablecoin 1:1 con USDT, que
+este proyecto trata como USD igual que el resto de quote currencies
+stablecoin). No hace falta ninguna llamada ni conversión adicional, igual que
+con `open_interest_usd`:
+
+    volume_24h_usd = quote_volume   (directo, sin conversión, ya en el
+                                      mismo payload de contracts)
 """
 
 from __future__ import annotations
@@ -197,6 +214,15 @@ class NadoConnector:
                 except (TypeError, ValueError):
                     open_interest_usd = None
 
+            # Ver docstring: quote_volume ya viene en USDT0 (≈USD), sin conversión.
+            volume_24h_raw = row.get("quote_volume")
+            volume_24h_usd = None
+            if volume_24h_raw is not None:
+                try:
+                    volume_24h_usd = float(volume_24h_raw)
+                except (TypeError, ValueError):
+                    volume_24h_usd = None
+
             symbol = base_currency[: -len(PERP_SUFFIX)] if base_currency.endswith(PERP_SUFFIX) else base_currency
 
             out.append(
@@ -210,6 +236,7 @@ class NadoConnector:
                     mark_price=mark_price,
                     next_funding_time=None,
                     open_interest_usd=open_interest_usd,
+                    volume_24h_usd=volume_24h_usd,
                 )
             )
 

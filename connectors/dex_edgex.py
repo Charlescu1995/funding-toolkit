@@ -42,6 +42,42 @@ Nota sobre el símbolo: `contractName` viene con el activo de colateral
 pegado al final, y en edgeX ese activo puede ser USDT o USDC según el
 contrato (comprobado en vivo: "BTCUSDC", no "BTCUSDT") — se recortan ambos
 sufijos, no solo USDT como en el resto de conectores.
+
+--- Nota sobre volumen 24h: hueco conocido, no disponible en bulk (Paso 6
+    punto 2 — Volumen) ---
+
+Se comprobó en vivo (WebFetch, mismo patrón que el resto del proyecto) la
+documentación de los CUATRO endpoints públicos de edgeX relevantes:
+
+  - `getLatestFundingRate` (el que YA usa este conector): sus campos
+    documentados son contractId, fundingTime, fundingTimestamp, oraclePrice,
+    indexPrice, fundingRate, premiumIndex, impactMarginNotional,
+    fundingRateIntervalMin, starkExFundingIndex, etc. — NINGUNO es volumen.
+  - `getMetaData` (el otro que YA usa este conector, para la lista de
+    contratos): tampoco trae volumen, solo metadata de contrato (tickSize,
+    stepSize, fundingMaxRate...).
+  - `getDepth` y `getMarketStatus`: tampoco traen volumen.
+  - `getTicker` (`/api/v2/public/quote/getTicker`): este SÍ documenta
+    volumen de 24h — `"size"` (volumen en unidades del activo base) y
+    `"value"` (volumen ya en USD/notional) — sería el candidato ideal. PERO
+    es el MISMO endpoint que este conector ya investigó y descartó en su
+    primera versión (ver el primer párrafo de este docstring): en la
+    práctica devuelve siempre `"data": []`, con o sin `contractId`. Se ha
+    vuelto a comprobar en vivo hoy mismo, con varios contractId reales
+    (BTCUSDC=30000001, ETHUSDC=30000002) y también sin ningún parámetro: en
+    los tres casos, `"data": []` — el mismo comportamiento roto ya
+    documentado, no un problema nuevo de esta tarea.
+
+Como ninguno de los dos endpoints que el conector usa realmente trae
+volumen, y el único endpoint que sí lo documenta (`getTicker`) es el mismo
+que ya se comprobó que no devuelve datos en la práctica, no hay ninguna
+fuente bulk fiable de volumen de 24h para edgeX en este momento. Siguiendo
+la misma regla que ya aplica aquí a `open_interest_usd` (ver nota de arriba)
+y el mismo criterio del resto del proyecto (p.ej. `mark_price` en HTX): se
+deja `volume_24h_usd=None` para todos los pares de edgeX, sin inventar un
+valor ni hacer peticiones símbolo a símbolo para conseguirlo. Si en el
+futuro `getTicker` empieza a devolver datos reales, se puede retomar este
+punto usando su campo `"value"` directamente (ya en USD, sin conversión).
 """
 
 from __future__ import annotations
@@ -160,6 +196,7 @@ class EdgeXConnector:
                         mark_price=mark_price,
                         next_funding_time=None,
                         open_interest_usd=None,  # ver nota del docstring
+                        volume_24h_usd=None,  # ver nota del docstring (hueco conocido)
                     )
                 )
 

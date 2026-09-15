@@ -46,6 +46,7 @@ class NormalizedRate:
     rate_per_8h_pct: float   # tasa reescalada a "cada 8h", en % → referencia rápida, estilo Loris
     mark_price: float | None
     open_interest_usd: float | None
+    volume_24h_usd: float | None
 
     @property
     def pays_longs(self) -> bool:
@@ -83,6 +84,7 @@ def normalize(rate: FundingRate) -> NormalizedRate:
         rate_per_8h_pct=rate_per_8h,
         mark_price=rate.mark_price,
         open_interest_usd=rate.open_interest_usd,
+        volume_24h_usd=rate.volume_24h_usd,
     )
 
 

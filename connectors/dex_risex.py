@@ -105,6 +105,43 @@ cada mercado, así que esto no afecta al cálculo, solo corrige la expectativa
 del docstring anterior). Conversión:
 
     interval_hours = funding_interval_ns / 1e9 / 3600
+
+--- Nota sobre volumen 24h (Paso 6 punto 2 — Volumen): campo confirmado
+    contra la documentación oficial, NO contra un ejemplo JSON en vivo ---
+
+`api.rise.trade` no fue alcanzable hoy para volver a comprobar un mercado
+real: ni por `curl` (bloqueado por la política de red de ESTE sandbox — el
+propio proxy de egress lo confirma con `connect_rejected` en
+`/__agentproxy/status`) ni por WebFetch (a diferencia de otros exchanges de
+este proyecto donde WebFetch sí rodea el bloqueo del sandbox, aquí el propio
+`api.rise.trade` devolvió un 403 directamente al fetcher de WebFetch, con o
+sin `force_refresh`) — así que, a diferencia del resto de este conector
+(cuyos hallazgos vienen todos de respuestas reales en producción, ver
+historial de bugs más arriba), este punto concreto NO se pudo contrastar
+contra un mercado real.
+
+En su lugar, se consultó la documentación OpenAPI en vivo del propio
+proveedor (WebFetch sí pudo leer `developer.rise.trade`, un dominio
+distinto al de la API): el schema `apiMarketInfo` de `GET /v1/markets`
+documenta explícitamente un campo `quote_volume_24h`, descrito como "24h
+quote volume", al mismo nivel que `mark_price`/`open_interest`/
+`current_funding_rate`. Como el activo de cotización de RiseX es USDC (ver
+`quote_asset_symbol`, ya usado en este mismo conector para recortar el
+símbolo — ver `_base_symbol()`), se asume que `quote_volume_24h` ya viene en
+USDC ≈ USD y se usa DIRECTAMENTE, sin multiplicar por `mark_price` — mismo
+patrón que `turnoverOf24h` en KuCoin o `trade_turnover` en HTX (campos ya en
+la moneda de cotización).
+
+Esto queda marcado como asunción SIN confirmar contra un valor numérico
+real — dado el historial de este mismo conector (dos rondas de bugs donde la
+respuesta real no coincidía con lo que documentaba
+`developer.rise.trade`, ver arriba), `quote_volume_24h` es el primer campo a
+verificar en cuanto el conector esté desplegado y esta API vuelva a ser
+alcanzable: podría no existir realmente, tener otro nombre, o venir en otra
+unidad. Se accede de forma defensiva (`row.get(...)`, con `None` si falta),
+así que si el campo no existe en la respuesta real, `volume_24h_usd` queda
+simplemente en `None` para todos los mercados, sin romper el resto del
+conector.
 """
 
 from __future__ import annotations
@@ -285,6 +322,17 @@ class RiseXConnector:
                 except (TypeError, ValueError):
                     open_interest_usd = None
 
+            # Ver docstring (nota de volumen 24h): campo documentado en el
+            # OpenAPI spec oficial, sin confirmar contra un valor real —
+            # se asume ya en USD (quote asset = USDC), sin conversión.
+            volume_24h_raw = row.get("quote_volume_24h")
+            volume_24h_usd = None
+            if volume_24h_raw is not None:
+                try:
+                    volume_24h_usd = float(volume_24h_raw)
+                except (TypeError, ValueError):
+                    volume_24h_usd = None
+
             symbol = (base_symbol or _strip_quote_suffix(raw_symbol)).upper()
 
             out.append(
@@ -298,6 +346,7 @@ class RiseXConnector:
                     mark_price=mark_price,
                     next_funding_time=None,
                     open_interest_usd=open_interest_usd,
+                    volume_24h_usd=volume_24h_usd,
                 )
             )
 

@@ -13,7 +13,8 @@ de hilos):
     GET https://contract.mexc.com/api/v1/contract/funding_rate
         -> funding rate, intervalo (collectCycle) y precios, de todos los contratos
     GET https://contract.mexc.com/api/v1/contract/ticker
-        -> holdVol (open interest en Nº de contratos), de todos los contratos
+        -> holdVol (open interest en Nº de contratos) y amount24 (volumen de
+           24h ya en USD), de todos los contratos
 
 Todo comprobado en vivo (WebFetch directo — ver nota de entorno en
 connectors/cex_kucoin.py: estos hosts están bloqueados por la política de
@@ -65,6 +66,17 @@ base ni en USD. Cada contrato representa `contractSize` unidades del activo
 base (0.0001 BTC/contrato para BTC_USDT, confirmado en /contract/detail):
 
     open_interest_usd = holdVol * contractSize * fairPrice
+
+--- Nota sobre `amount24` (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
+
+El mismo /contract/ticker trae, junto a holdVol, dos campos de volumen:
+`volume24` (545,348,505 en el ejemplo real de BTC_USDT) y `amount24`
+(4,265,182,792.82). `volume24` está en Nº DE CONTRATOS, igual que holdVol
+(comprobado por consistencia interna: volume24 × contractSize × fairPrice ≈
+amount24 — ambos lados dan ≈$4.25-4.27B, la pequeña diferencia es normal
+porque el precio se mueve entre el cálculo de cada campo en el propio
+exchange). `amount24` ya es el turnover de 24h en USD directamente, así que
+se usa tal cual, sin repetir la conversión que sí hace falta para holdVol.
 """
 
 from __future__ import annotations
@@ -140,6 +152,12 @@ class MexcConnector:
             for row in ticker_rows
             if isinstance(row, dict) and row.get("symbol")
         }
+        # Ver docstring: amount24 ya viene en USD, no hace falta convertir.
+        volume_24h_by_symbol = {
+            row["symbol"]: row.get("amount24")
+            for row in ticker_rows
+            if isinstance(row, dict) and row.get("symbol")
+        }
 
         out: list[FundingRate] = []
         skipped: dict[str, str] = {}
@@ -189,6 +207,14 @@ class MexcConnector:
                 except (TypeError, ValueError):
                     open_interest_usd = None
 
+            volume_24h_raw = volume_24h_by_symbol.get(symbol)
+            volume_24h_usd = None
+            if volume_24h_raw is not None:
+                try:
+                    volume_24h_usd = float(volume_24h_raw)
+                except (TypeError, ValueError):
+                    volume_24h_usd = None
+
             base_symbol = symbol.split("_")[0] if "_" in symbol else symbol
 
             out.append(
@@ -202,6 +228,7 @@ class MexcConnector:
                     mark_price=mark_price,
                     next_funding_time=None,
                     open_interest_usd=open_interest_usd,
+                    volume_24h_usd=volume_24h_usd,
                 )
             )
 

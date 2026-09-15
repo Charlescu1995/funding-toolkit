@@ -76,6 +76,15 @@ Solo se ha observado "Open" en el contrato de mayor volumen consultado — se
 acepta únicamente ese valor exacto, igual que con `orderBookState` en
 Backpack o `trading_status` en Nado, por si existen otros estados (pausado,
 deslistado...) no vistos todavía en este único ejemplo.
+
+--- Nota sobre `turnoverOf24h` (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
+
+El mismo objeto ya trae el volumen de 24h directamente en USD, sin hacer
+falta ninguna llamada aparte ni conversión: `turnoverOf24h` (ej. XBTUSDTM:
+3.701053670146E8 ≈ $370.1M) es el turnover en la moneda de cotización
+(USDT), a diferencia de `volumeOf24h` (4724.686), que viene en unidades del
+activo base (XBT) y por tanto necesitaría multiplicarse por el precio —
+`turnoverOf24h` ya hace ese trabajo, así que se usa tal cual.
 """
 
 from __future__ import annotations
@@ -173,6 +182,16 @@ class KucoinConnector:
             base_currency = row.get("baseCurrency") or raw_symbol
             symbol = _SYMBOL_ALIASES.get(base_currency, base_currency)
 
+            # Ver docstring: turnoverOf24h ya viene en USDT (moneda de
+            # cotización), no hace falta convertir como con openInterest.
+            volume_24h_raw = row.get("turnoverOf24h")
+            volume_24h_usd = None
+            if volume_24h_raw is not None:
+                try:
+                    volume_24h_usd = float(volume_24h_raw)
+                except (TypeError, ValueError):
+                    volume_24h_usd = None
+
             out.append(
                 FundingRate(
                     exchange="kucoinfutures",
@@ -184,6 +203,7 @@ class KucoinConnector:
                     mark_price=mark_price,
                     next_funding_time=None,
                     open_interest_usd=open_interest_usd,
+                    volume_24h_usd=volume_24h_usd,
                 )
             )
 

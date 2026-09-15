@@ -28,6 +28,16 @@ barata estándar: si una de las dos piernas tiene un OI muy bajo comparado con
 el tamaño que quieres mover, esa es la señal de alerta de que vas a sufrir
 slippage entrando o saliendo.
 
+Volume 24h (Paso 6, punto 2 de la comparativa con Kusi/Smartbitrage)
+--------------------------------------------------------------------
+El Open Interest dice cuánto hay abierto AHORA MISMO en cada pierna; el
+volumen de 24h dice cuánto se ha estado MOVIENDO — un mercado puede tener un
+OI decente pero estar prácticamente congelado (nadie entra ni sale), lo que
+en la práctica significa que entrar o salir de tu propia posición va a mover
+el precio más de lo que el OI por sí solo sugeriría. Son señales de liquidez
+complementarias, no intercambiables, por eso se muestran las dos por
+separado en vez de fundirlas en un único número.
+
 Price Spread (Paso 6, punto 3 de la comparativa con Kusi/Smartbitrage)
 ------------------------------------------------------------------------
 Un APR de spread altísimo no sirve de nada si para conseguirlo hay que
@@ -115,6 +125,27 @@ def oi_depth(long_rate: NormalizedRate, short_rate: NormalizedRate) -> OIDepth:
     short_oi = short_rate.open_interest_usd
     bottleneck = min(long_oi, short_oi) if long_oi is not None and short_oi is not None else None
     return OIDepth(long_oi_usd=long_oi, short_oi_usd=short_oi, bottleneck_usd=bottleneck)
+
+
+@dataclass
+class VolumeDepth:
+    long_volume_usd: float | None
+    short_volume_usd: float | None
+    bottleneck_usd: float | None  # la pierna con menos volumen; el lado que de verdad limita cuánto puedes mover
+
+    @property
+    def bottleneck_side(self) -> str | None:
+        if self.long_volume_usd is None or self.short_volume_usd is None:
+            return None
+        return "long" if self.long_volume_usd <= self.short_volume_usd else "short"
+
+
+def volume_depth(long_rate: NormalizedRate, short_rate: NormalizedRate) -> VolumeDepth:
+    """Mismo patrón que oi_depth(), pero con el volumen negociado en 24h de cada pierna."""
+    long_vol = long_rate.volume_24h_usd
+    short_vol = short_rate.volume_24h_usd
+    bottleneck = min(long_vol, short_vol) if long_vol is not None and short_vol is not None else None
+    return VolumeDepth(long_volume_usd=long_vol, short_volume_usd=short_vol, bottleneck_usd=bottleneck)
 
 
 @dataclass

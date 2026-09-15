@@ -89,6 +89,57 @@ oficial de GRVT en cuanto el conector devuelva números: la escala de precios
 (÷ 1e9) y la conversión de "centibeeps" (÷ 1e6) — ver puntos más arriba en
 este docstring, siguen siendo deducciones sin un ejemplo numérico oficial
 confirmado.
+
+--- Nota sobre volumen 24h (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
+
+El log de producción citado arriba ya reveló, sin necesitar ninguna llamada
+extra, que el ticker de GRVT trae CUATRO campos de volumen de 24h al mismo
+nivel que `mark_price`/`open_interest`: `buy_volume_24h_b`,
+`sell_volume_24h_b`, `buy_volume_24h_q`, `sell_volume_24h_q`. El propio
+`/full/v1/ticker` es POST-only (confirmado de nuevo hoy: un GET directo a esa
+URL responde `405 Method Not Allowed`, así que no se puede reproducir un
+ejemplo en vivo con WebFetch, que solo hace GET — la misma limitación ya
+explicada más arriba para el resto de este conector), así que la evidencia
+aquí es la documentación oficial en vivo (WebFetch contra
+https://api-docs.grvt.io/market_data_api/, no solo el nombre del campo):
+
+  - `buy_volume_24h_b` / `sell_volume_24h_b`: "the 24 hour taker buy/sell
+    volume of the instrument, **expressed in base asset decimal units**".
+  - `buy_volume_24h_q` / `sell_volume_24h_q`: lo mismo pero "**expressed in
+    quote asset decimal units**" — para un instrumento tipo "BTC_USDT_Perp",
+    el activo de cotización es USDT ≈ USD.
+
+Confirma exactamente lo que sugería el sufijo (`_b` = base, `_q` = quote) y
+la pista de esta tarea: el lado a usar es `_q`, y como GRVT reporta
+comprador y vendedor por separado, se suman ambos para el volumen total
+negociado en el instrumento:
+
+    volume_24h_usd = (buy_volume_24h_q + sell_volume_24h_q) / <escala>
+
+**Sobre la escala** — esto es lo que NO se pudo confirmar con un ejemplo
+numérico real: el JSON de ejemplo que trae la propia página de docs para
+`ticker` es un placeholder, no un valor real (los cuatro campos de volumen
+aparecen con el mismo valor de relleno idéntico, "123456.78", y el
+`mark_price` de ese mismo ejemplo, "65038.01", contradice la escala de punto
+fijo ÷1e9 que sí se confirmó en producción para `mark_price` — ver el bloque
+de "Puntos SIN verificar" más arriba: los ejemplos de esta documentación NO
+son fiables numéricamente). Ante esa contradicción, se seguye el mismo
+criterio que el resto del módulo: como la propia redacción oficial para
+`buy_volume_24h_q`/`sell_volume_24h_q` ("expressed in ... decimal units") es
+la MISMA fórmula de palabras que usa la documentación para `open_interest`
+("in base asset decimal units" — ver nota de open_interest más arriba, que
+el módulo YA escala ÷1e9 por eso), se aplica la misma escala de punto fijo
+÷1e9 (`PRICE_SCALE`) a la suma de `_q`, en vez de asumir que viene en USD
+plano sin escalar:
+
+    volume_24h_usd = (float(buy_volume_24h_q) + float(sell_volume_24h_q)) / PRICE_SCALE
+
+Esto es una asunción adicional, NO confirmada contra un valor numérico real
+(se añade a la lista de "puntos sin verificar" del módulo, arriba) — el
+primer número de volumen que devuelva este conector en producción es el
+candidato a comparar contra la interfaz oficial de GRVT, igual que ya se
+hizo con `funding_rate_8h_curr` y como sigue pendiente con el resto de
+escalas.
 """
 
 from __future__ import annotations
@@ -249,6 +300,20 @@ class GrvtConnector:
                     except (TypeError, ValueError):
                         oi_usd = None
 
+                # Ver docstring del módulo (nota de volumen 24h): se suman
+                # comprador + vendedor del lado "_q" (quote asset = USD para
+                # estos instrumentos), con la misma escala ÷1e9 que el resto
+                # de campos numéricos de GRVT (asunción, no confirmada contra
+                # un valor real — ver docstring).
+                buy_q_raw = ticker.get("buy_volume_24h_q")
+                sell_q_raw = ticker.get("sell_volume_24h_q")
+                volume_24h_usd = None
+                if buy_q_raw is not None and sell_q_raw is not None:
+                    try:
+                        volume_24h_usd = (float(buy_q_raw) + float(sell_q_raw)) / PRICE_SCALE
+                    except (TypeError, ValueError):
+                        volume_24h_usd = None
+
                 base = name.split("_")[0] if "_" in name else name
                 interval_hours = interval_by_instrument.get(name, FALLBACK_INTERVAL_HOURS)
 
@@ -263,6 +328,7 @@ class GrvtConnector:
                         mark_price=mark_price,
                         next_funding_time=None,
                         open_interest_usd=oi_usd,
+                        volume_24h_usd=volume_24h_usd,
                     )
                 )
 

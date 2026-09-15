@@ -107,6 +107,39 @@ por compliance/región, no fantasmas. Se dejan en la lista de candidatos
 porque no hay forma fiable de distinguirlos de un cripto real solo por el
 nombre; si siguen fallando no rompen nada (se registran como error por
 símbolo, sin tirar el resto), solo generan algo de ruido en el log.
+
+--- Nota sobre volumen 24h (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
+
+El mismo `/v3/ticker` que ya se pide por símbolo (ver arriba — no es una
+llamada nueva) trae, en el mismo objeto que `fundingRate`/`markPrice`/
+`openInterest`, dos campos de volumen: `volume24h` (unidades del activo
+base) y `turnover24h` (mismo patrón de nombre que `turnoverOf24h` en
+KuCoin — notional ya en la moneda de cotización, USDT).
+
+Confirmado vía WebFetch contra `/v3/ticker?symbol=BTCUSDT` — con una
+salvedad honesta: al repetir la petición con `symbol=DOGEUSDT` y
+`symbol=ETHUSDT`, WebFetch devolvió el objeto IDÉNTICO las tres veces
+(mismo símbolo "SPCXUSDT", mismos valores, mismo `timeCost` de nivel
+raíz), es decir el parámetro `symbol` no pareció afectar la respuesta.
+`omni.apex.exchange` está bloqueado a nivel del proxy de red de este
+entorno (`curl` da 403 en el CONNECT, confirmado vía
+`/__agentproxy/status`), así que no se pudo repetir la prueba con una
+petición realmente directa para descartar una cache de WebFetch que ignore
+la query string — es la explicación más probable, no que la API en
+producción ignore `symbol` (el propio conector ya confirmó en una sesión
+anterior, con `/v3/history-funding`, que la API sí distingue símbolos).
+
+Dicho esto, el payload es internamente consistente y coherente con un
+ticker real, no con un valor inventado: los campos ya confirmados en vivo
+antes (`fundingRate`, `markPrice`, `openInterest`) aparecen sin cambios, y
+`turnover24h / volume24h` = 271180.1234 / 1847.31 ≈ 146.79 — un precio que
+cae justo dentro del rango `[lowPrice24h=142.63, highPrice24h=149.4]` del
+mismo objeto. Se toma como confirmación suficiente del NOMBRE del campo y
+de su unidad (ya en USDT, sin necesitar multiplicar por `markPrice`) —
+igual que con `fundingRate`/`markPrice`/`openInterest`, el valor real se
+toma en cada fetch de producción; esto solo confirma la FORMA del payload.
+
+    volume_24h_usd = float(turnover24h)   # ya en USDT, sin conversión
 """
 
 from __future__ import annotations
@@ -227,6 +260,16 @@ class ApexConnector:
                     except (TypeError, ValueError):
                         open_interest_usd = None
 
+                # Ver docstring: turnover24h ya viene en USDT (moneda de
+                # cotización), no hace falta convertir como con openInterest.
+                volume_24h_raw = row.get("turnover24h")
+                volume_24h_usd = None
+                if volume_24h_raw is not None:
+                    try:
+                        volume_24h_usd = float(volume_24h_raw)
+                    except (TypeError, ValueError):
+                        volume_24h_usd = None
+
                 out.append(
                     FundingRate(
                         exchange="apex",
@@ -238,6 +281,7 @@ class ApexConnector:
                         mark_price=mark_price,
                         next_funding_time=None,
                         open_interest_usd=open_interest_usd,
+                        volume_24h_usd=volume_24h_usd,
                     )
                 )
 

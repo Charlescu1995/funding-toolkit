@@ -6,6 +6,23 @@ directo con su API pública "info" (no requiere autenticación para leer datos
 de mercado — solo hará falta autenticación en el Paso 8, para ejecutar).
 
 Docs: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint
+
+--- Nota sobre volumen 24h (CONFIRMADO en la documentación oficial, Paso 6
+    punto 2 — Volumen; ver limitación de entorno más abajo) ---
+
+`metaAndAssetCtxs` es un endpoint POST (body `{"type": "metaAndAssetCtxs"}`,
+no acepta GET) — WebFetch, la única herramienta de red que funciona en este
+sandbox (ver nota de entorno en connectors/cex_kucoin.py), solo hace GET, así
+que no se pudo re-probar en vivo símbolo por símbolo como con el resto de
+conectores de este lote. En su lugar se confirmó contra la documentación
+oficial de Hyperliquid (gitbook), que expone el esquema completo del objeto
+`AssetCtx` con un ejemplo real de payload: cada `AssetCtx` trae
+`dayNtlVlm` (ej. "1169046.29406"), documentado explícitamente como "24-hour
+notional trading volume in USD" — ya en USD, sin conversión, igual patrón
+que `funding`, `markPx` y `openInterest` que este conector ya usa del mismo
+objeto. Se usa directamente:
+
+    volume_24h_usd = float(ctx["dayNtlVlm"])
 """
 
 from __future__ import annotations
@@ -63,6 +80,15 @@ class HyperliquidConnector:
                 except (TypeError, ValueError):
                     oi_usd = None
 
+            # Ver docstring: dayNtlVlm ya viene en USD, sin conversión.
+            day_ntl_vlm = ctx.get("dayNtlVlm")
+            volume_24h_usd = None
+            if day_ntl_vlm is not None:
+                try:
+                    volume_24h_usd = float(day_ntl_vlm)
+                except (TypeError, ValueError):
+                    volume_24h_usd = None
+
             out.append(
                 FundingRate(
                     exchange="hyperliquid",
@@ -74,6 +100,7 @@ class HyperliquidConnector:
                     mark_price=float(mark_price) if mark_price is not None else None,
                     next_funding_time=self._next_hour_utc(),
                     open_interest_usd=oi_usd,
+                    volume_24h_usd=volume_24h_usd,
                 )
             )
 

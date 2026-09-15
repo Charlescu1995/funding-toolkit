@@ -524,6 +524,33 @@ aparte). Funding rate y Open Interest confirmados en vivo con el mismo rigor que
 Backpack: `fundingRate` es tasa cruda horaria (no anualizada), `openInterest` viene en
 unidades del activo base y hay que multiplicarlo por `markPrice`.
 
+#### Confirmado en el primer despliegue real: Vertex bloqueado, ApeX con ruido real (corregido)
+
+Backpack, Nado y Hibachi entraron limpios en su primer despliegue real (sin ningún
+símbolo descartado, ver más abajo). Vertex y ApeX, no — cada uno por un motivo distinto:
+
+- **Vertex: 0 pares, `SSLEOFError` al conectar con `gateway.prod.vertexprotocol.com`.**
+  No es un bug del conector — es el mismo fallo de conexión que ya se veía venir en la
+  sección de arriba (no se pudo alcanzar ese host ni siquiera desde este entorno de
+  desarrollo), ahora CONFIRMADO también desde el propio Streamlit Cloud, no solo desde
+  aquí. El patrón (fallo a nivel de conexión/TLS, no un error de la aplicación) es el
+  mismo que ya sufren Binance/Bybit en este despliegue — probablemente Vertex bloquea
+  conexiones desde rangos de IP de proveedores cloud/datacenter. No hay nada que
+  arreglar en el código: el conector se queda ahí, fail-loud como los demás (se ve en
+  el banner "Algunos exchanges no respondieron"), a la espera de que algún día responda
+  desde esta ubicación de despliegue.
+- **ApeX: 89 pares reales sí llegaron, pero 271/370 símbolos candidatos fallaron con
+  403.** Investigado: casi ninguno de esos 271 era un mercado cripto real — eran
+  mercados de predicción y apuestas deportivas de ApeX (`Raptors_Win_Against_Hornets_Nov29USDT`,
+  `Christopher_Waller_nominated_as_Fed_ChairUSDT`...) mezclados sin ningún campo
+  distintivo en `data.contractConfig.tokens`. **Ya corregido**: se añadió un filtro por
+  forma (`_looks_like_crypto_token()`) que descarta cualquier token con "_" antes de
+  pedir su ticker — ningún token cripto real de ApeX lleva guion bajo, así que el
+  filtro no puede descartar un mercado legítimo por error. Quedan sin filtrar (a
+  propósito) unos pocos símbolos de acciones/materias primas (`AAPLUSDT`, `XAUUSDT`)
+  que también dieron 403 — probablemente RWA con acceso restringido por compliance, no
+  fantasmas; no rompen nada, solo generan algo de log residual.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

@@ -80,6 +80,33 @@ plausible) y 1000PEPE (~$118.8K de notional plausible), ambos coherentes al
 multiplicar `openInterest × markPrice`.
 
     open_interest_usd = openInterest × markPrice
+
+--- Bug real encontrado y corregido en producción: `data.contractConfig.tokens`
+    mezcla perpetuos cripto de verdad con mercados de predicción/apuestas ---
+
+Primer despliegue real: 271 de 370 símbolos candidatos fallaron con 403
+Forbidden (no 404, no vacío — 403 real). Mirando la lista de símbolos que
+fallaron, casi ninguno es un activo cripto: son mercados de predicción de
+ApeX ("BTC_hit_115k_JulyUSDT", "Christopher_Waller_nominated_as_Fed_ChairUSDT",
+"Russia_Ukraine_ceasefire_2025USDT") y apuestas deportivas
+("Raptors_Win_Against_Hornets_Nov29USDT", "MUN_Win_Against_BOU_Dec15_EPLUSDT")
+— todos con guiones bajos como separador de palabras, un patrón que ningún
+token cripto real de la lista usa (BTC, ETH, 1000PEPE... siempre sin "_").
+`data.contractConfig.tokens` no distingue estos tipos de producto con ningún
+campo — los mezcla todos igual. Se añadió un filtro por FORMA (ver
+`_looks_like_crypto_token()`): se descarta cualquier token con "_" antes de
+pedir su ticker, en vez de gastar una petición HTTP (y un 403 logueado) por
+cada uno. Esto no es una asunción arriesgada — los ~300 tokens cripto reales
+observados en vivo nunca llevan guion bajo, así que el filtro no puede
+descartar un mercado cripto legítimo por error.
+
+Quedan sin filtrar (a propósito) símbolos de acciones/materias primas sin
+guion bajo (ej. "AAPLUSDT", "TSLAUSDT", "XAUUSDT") que también dieron 403 en
+el primer despliegue — probablemente productos RWA con acceso restringido
+por compliance/región, no fantasmas. Se dejan en la lista de candidatos
+porque no hay forma fiable de distinguirlos de un cripto real solo por el
+nombre; si siguen fallando no rompen nada (se registran como error por
+símbolo, sin tirar el resto), solo generan algo de ruido en el log.
 """
 
 from __future__ import annotations
@@ -101,6 +128,15 @@ INTERVAL_HOURS = 1.0
 MAX_WORKERS = 20
 
 QUOTE_SUFFIX = "USDT"
+
+
+def _looks_like_crypto_token(token: str) -> bool:
+    """
+    Ver docstring del módulo (bug real de producción): descarta mercados de
+    predicción/apuestas deportivas por FORMA — todos usan "_" como
+    separador de palabras, algo que ningún token cripto real de ApeX trae.
+    """
+    return "_" not in token
 
 
 class ApexConnector:
@@ -125,7 +161,11 @@ class ApexConnector:
 
         tokens = ((config_payload.get("data") or {}).get("contractConfig") or {}).get("tokens") or []
 
-        base_symbols = [t.get("token") for t in tokens if isinstance(t, dict) and t.get("token")]
+        base_symbols = [
+            t.get("token")
+            for t in tokens
+            if isinstance(t, dict) and t.get("token") and _looks_like_crypto_token(t["token"])
+        ]
 
         if not base_symbols:
             raise RuntimeError(

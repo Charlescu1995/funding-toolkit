@@ -18,6 +18,9 @@ import logging
 import ccxt
 
 from .base import FundingRate, VenueType
+from .cex_htx import htx
+from .cex_kucoin import kucoin
+from .cex_mexc import mexc
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +35,11 @@ DEFAULT_INTERVAL_HOURS = {
     "bybit": 8,
     "okx": 8,
     "bitget": 8,
-    "kucoinfutures": 8,
     "gate": 8,
-    "mexc": 8,
-    "htx": 8,
+    # kucoinfutures/mexc/htx YA NO usan este diccionario — tienen conector
+    # propio (cex_kucoin.py/cex_mexc.py/cex_htx.py) que lee el intervalo real
+    # por símbolo de cada API en vez de asumir un valor fijo.
+    #
     # Aster (ver aster() más abajo): arquitectura de DEX, pero ccxt ya lo
     # soporta igual que un CEX (fetch_funding_rates() bulk funciona). 8h es
     # el intervalo "clásico" tipo Binance — Aster expone `fundingIntervalHours`
@@ -230,20 +234,8 @@ def bitget() -> CexConnector:
     return CexConnector("bitget")
 
 
-def kucoin() -> CexConnector:
-    return CexConnector("kucoinfutures")
-
-
 def gate() -> CexConnector:
     return CexConnector("gate")
-
-
-def mexc() -> CexConnector:
-    return CexConnector("mexc")
-
-
-def htx() -> CexConnector:
-    return CexConnector("htx")
 
 
 def aster() -> CexConnector:
@@ -256,20 +248,33 @@ def aster() -> CexConnector:
     return CexConnector("aster", venue_type=VenueType.DEX)
 
 
+# kucoinfutures/mexc/htx YA NO son CexConnector(ccxt_id=...): ccxt no tiene
+# implementado fetch_funding_rates() para ninguno de los tres (lanza
+# NotSupported, comprobado leyendo su código fuente) — se sustituyeron por
+# conectores propios (connectors/cex_kucoin.py, cex_mexc.py, cex_htx.py, cada
+# uno con su propia investigación documentada en su docstring), importados
+# arriba y reexportados aquí para que cli.py/core/data_service.py sigan sin
+# tener que saber qué exchanges usan ccxt y cuáles no — mismo patrón que ya
+# se sigue con el resto de conectores propios del proyecto (edgeX, GRVT...).
 ALL_CEX_FACTORIES = [binance, bybit, okx, bitget, kucoin, gate, mexc, htx]
 
 # exchange_name (el mismo que NormalizedRate.exchange) -> factory. Se usa para
 # reconstruir un conector concreto cuando hace falta pedir OI Depth solo para
 # las oportunidades que ya salieron arriba en el ranking (ver core/opportunities.py).
+#
+# kucoinfutures/mexc/htx NO están aquí (aunque SÍ están en ALL_CEX_FACTORIES):
+# esta tabla es solo para exchanges cuyo fetch_funding_rates() masivo NO trae
+# OI y por tanto necesitan una llamada aparte símbolo a símbolo
+# (fetch_open_interest_usd(), método propio de CexConnector/ccxt). Los tres
+# conectores propios de KuCoin/MEXC/HTX (ver cex_kucoin.py/cex_mexc.py/
+# cex_htx.py) ya traen open_interest_usd resuelto en el fetch masivo —
+# mismo motivo por el que Backpack/Nado/Hibachi tampoco están aquí.
 CEX_FACTORY_BY_NAME = {
     "binanceusdm": binance,
     "bybit": bybit,
     "okx": okx,
     "bitget": bitget,
-    "kucoinfutures": kucoin,
     "gate": gate,
-    "mexc": mexc,
-    "htx": htx,
     # Aster está aquí a propósito aunque se declare venue_type=DEX arriba: la
     # clave de este diccionario es "¿este exchange usa CexConnector (ccxt) y
     # por tanto necesita un fetch_open_interest() aparte, símbolo a símbolo,

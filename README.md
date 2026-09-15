@@ -8,7 +8,7 @@ ProFunding, Loris Tools y el selector delta-neutral de John5Cripto.
 Vamos construyéndola paso a paso. Progreso:
 
 - [x] Paso 1 — Arquitectura del proyecto y modelo de datos común
-- [x] Paso 2 — Conectores de datos: 8 CEX vía ccxt (Binance, Bybit, OKX, Bitget, KuCoin, Gate, MEXC, HTX) + 15 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational, RiseX, Backpack, Nado, Hibachi, Vertex y ApeX vía API directa/ccxt) — los 13 primeros DEX confirmados devolviendo datos reales en producción (Variational: 547 pares, RiseX: 30 pares tras dos rondas de fix, Backpack/Nado/Hibachi sin ningún error en su primer despliegue real, ver más abajo); Vertex y ApeX son la quinta tanda — ApeX confirmado en vivo, Vertex construido solo a partir de documentación (no se pudo alcanzar su API desde este entorno), **pendiente de confirmar contra tráfico real de producción** (ver sección dedicada más abajo). Se investigó también Drift Protocol y se descartó: su API quedó inutilizable tras el hackeo de ~$285-295M de abril 2026 y sus dominios oficiales redirigen a un fork no oficial ("Velocity Exchange") que no es Drift — ver sección dedicada
+- [x] Paso 2 — Conectores de datos: 8 CEX (Binance, Bybit, OKX, Bitget, Gate vía ccxt; KuCoin/MEXC/HTX con conector propio — ccxt no soporta `fetchFundingRates()` para estos tres, ver sexta tanda más abajo) + 15 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational, RiseX, Backpack, Nado, Hibachi, Vertex y ApeX vía API directa/ccxt) — los 13 primeros DEX confirmados devolviendo datos reales en producción (Variational: 547 pares, RiseX: 30 pares tras dos rondas de fix, Backpack/Nado/Hibachi sin ningún error en su primer despliegue real, ver más abajo); Vertex y ApeX son la quinta tanda — ApeX confirmado en vivo, Vertex construido solo a partir de documentación (no se pudo alcanzar su API desde este entorno) y CONFIRMADO en producción bloqueado por red (mismo patrón que Binance/Bybit — ver sección dedicada). Se investigó también Drift Protocol y se descartó: su API quedó inutilizable tras el hackeo de ~$285-295M de abril 2026 y sus dominios oficiales redirigen a un fork no oficial ("Velocity Exchange") que no es Drift — ver sección dedicada
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
 - [x] Paso 5 — Consistency Score y OI Depth (con fallback contratos×mark_price para exchanges que no dan el USD directo)
@@ -550,6 +550,79 @@ símbolo descartado, ver más abajo). Vertex y ApeX, no — cada uno por un moti
   propósito) unos pocos símbolos de acciones/materias primas (`AAPLUSDT`, `XAUUSDT`)
   que también dieron 403 — probablemente RWA con acceso restringido por compliance, no
   fantasmas; no rompen nada, solo generan algo de log residual.
+
+### CEX nuevos, sexta tanda (KuCoin, MEXC, HTX — conector propio en vez de ccxt)
+
+KuCoin Futures, MEXC Futures y HTX (Huobi) estaban en la lista de 8 CEX desde
+el Paso 2, pero los tres fallaban en producción con el mismo motivo:
+`ccxt.<exchange>.fetch_funding_rates()` lanza `NotSupported` — comprobado
+leyendo el código fuente de ccxt, no solo la bandera `has[...]`. No es un
+bloqueo de red (a diferencia de Binance/Bybit/Vertex, ver más abajo): ccxt
+simplemente no tiene implementado ese método para estos tres exchanges. La
+solución fue la misma que ya se aplicó con los DEX que no estaban en ccxt
+(edgeX, GRVT...): escribir un conector propio por exchange, investigado
+contra la API real (`connectors/cex_kucoin.py`, `cex_mexc.py`, `cex_htx.py`),
+y sustituir su entrada en `ALL_CEX_FACTORIES`/`CEX_FACTORY_BY_NAME` en
+`cex_ccxt.py`. Los otros 5 CEX (Binance, Bybit, OKX, Bitget, Gate) siguen
+usando `CexConnector` vía ccxt sin cambios.
+
+Nota sobre el propio proceso de investigación: los tres hosts
+(`api-futures.kucoin.com`, `contract.mexc.com`, `api.hbdm.com`) están en la
+lista de dominios bloqueados por la política de red de ESTE sandbox de
+desarrollo (confirmado vía `/__agentproxy/status` — bloqueo del proxy de
+egress, no del exchange), así que toda la investigación se hizo con
+`WebFetch` en vez de `curl` directo. Sigue siendo contra la API real en
+producción, no contra documentación — no debería fallar por este motivo
+concreto en Streamlit Cloud, que no tiene esta restricción.
+
+- **KuCoin Futures**: el conector más simple de los tres — un único endpoint
+  (`GET /api/v1/contracts/active`) trae metadata, funding rate, mark price,
+  index price y open interest de golpe, sin pool de hilos. Bug de cruce de
+  símbolos evitado a propósito: KuCoin usa "XBT" (no "BTC") como
+  `baseCurrency` para Bitcoin — sin normalizarlo, KuCoin nunca habría
+  cruzado con el resto de exchanges en el ranking. `openInterest` viene en
+  Nº de contratos, se multiplica por `multiplier` (activo base/contrato) y
+  por `markPrice` para el USD — confirmado dando un notional plausible
+  (~$812M en BTC).
+- **MEXC Futures**: tres llamadas bulk (`/contract/detail` para metadata +
+  `contractSize`, `/contract/funding_rate` para tasa + intervalo real por
+  símbolo, `/contract/ticker` para el open interest en contratos). A
+  diferencia del resto de CEX del proyecto (que asumen 8h fijo porque ccxt
+  no siempre expone el intervalo real), MEXC sí lo da por contrato
+  (`collectCycle`) y de verdad varía — confirmado en vivo: 8h para BTC_USDT,
+  4h para XAU_USDT. Además, MEXC mezcla cripto con activos RWA
+  (`XAU_USDT`, `GOOGLSTOCK_USDT`, `NVIDIA_USDT`...) en el mismo listado —
+  a diferencia del bug real de ApeX (que mezclaba cripto con mercados de
+  predicción que SÍ rompían con 403), aquí los RWA de MEXC responden con
+  datos de funding reales y válidos, así que se dejan sin filtrar a
+  propósito: son oportunidades legítimas más, coherente con que este
+  proyecto ya cubre "cripto + RWA" por diseño.
+- **HTX**: cuatro llamadas bulk (`swap_contract_info` para metadata +
+  intervalo real por contrato vía `settlement_period`, `swap_batch_funding_rate`
+  para la tasa, `swap_open_interest` para el open interest, y
+  `/market/detail/batch_merged` como proxy de mark price vía `close`, ya que
+  no existe ningún endpoint de HTX con un campo de "mark price" dedicado
+  para swaps — se probó `/swap_batch_mark_price`, que no existe, 404 real).
+  Caso curioso confirmado en vivo: a diferencia de KuCoin/MEXC (donde el open
+  interest viene en Nº de contratos y hay que convertirlo a mano), el campo
+  `value` de `swap_open_interest` en HTX YA viene en USD directamente — se
+  usa tal cual, sin multiplicar por `contract_size` ni por precio. También
+  se confirmó una inconsistencia real de la propia API: tres de los cuatro
+  endpoints envuelven su lista bajo `"data"`, pero el de ticker
+  (`batch_merged`) la envuelve bajo `"ticks"` en su lugar — el conector lo
+  maneja explícitamente en vez de asumir el mismo nombre en los cuatro.
+
+Los tres conectores se probaron con payloads sintéticos (mock de
+`requests.Session.get`) que reproducen la forma real vista en vivo, incluyendo
+casos borde: un mercado no operable por exchange (debe descartarse sin tirar
+el resto) y, para MEXC, un símbolo RWA junto al cripto (debe conservarse).
+
+**Pendiente de confirmar contra el primer despliegue real** (mismo criterio
+que el resto de conectores nuevos de este proyecto): si al desplegar alguno
+de los tres da un APR o un Open Interest claramente disparatado, revisar
+primero los puntos marcados arriba como "confirmado en vivo, un solo valor
+observado" (el campo `status`/`contract_status`/`apiAllowed` de cada uno,
+visto con un único ejemplo cada vez).
 
 ## Importante sobre dónde correr esto
 

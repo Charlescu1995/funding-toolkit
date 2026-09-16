@@ -1020,6 +1020,60 @@ que vio con Price Spread alto y pegue lo que salga (es JSON, se puede copiar
 directo) — con eso se decide entre las dos hipótesis con datos reales antes
 de tocar ningún cálculo.
 
+**Actualización — confirmado con datos reales, y es un choque de símbolos,
+no divergencia de precio.** El usuario pegó el panel de diagnóstico con
+`raw_symbol`/`mark_price` reales de las 20 oportunidades con Price Spread
+más alto. Los datos fueron inequívocos:
+
+  - **"CAT"**: Caterpillar Inc. tokenizada en bitget (`raw=CAT/USDT:USDT`,
+    `mark_price=$785.85`, el precio real de la acción) frente a un
+    memecoin sin ninguna relación también llamado "CAT" en mexc
+    (`raw=CAT_USDT`, `mark_price=$0.000001946`) — más de 400 millones de
+    veces más barato. Dos activos completamente distintos, mismo ticker.
+  - **"RTX"**: Raytheon Technologies en gate (`$197.64`, precio real de la
+    acción) frente a otra cosa sin relación en aster (`$0.71`).
+  - **"HK50"**: el índice Hang Seng — mexc lo cotiza en `24638.7` (su nivel
+    real de mercado en esa fecha) mientras que gate lo cotiza en `3143.0`.
+  - **"XIAOMI"** (aster `$3.39` vs extended `$26.10`, ratio ~7.7x) y
+    **"PURR"** (extended `$11.10` vs hyperliquid `$0.10`, ratio ~110x)
+    entran en el mismo patrón, con algo menos de certeza sobre cuál es el
+    activo "real" en cada caso, pero con ratios igual de imposibles para
+    ser el mismo activo.
+
+Frente a esto, los casos con Price Spread moderado (**"CAKE"**: mexc
+`$2.18` vs extended `$1.30`, ratio 1.68x; **"BERA"**: lighter `$0.18` vs
+extended `$0.25`, ratio 1.38x; **"APEX"**: ratio 1.21x; **"NEIRO"**: ratio
+1.06x) tienen `raw_symbol`/`mark_price` del mismo orden de magnitud en las
+dos piernas — consistente con ser de verdad el mismo activo con una
+divergencia de precio real en un mercado poco líquido (justo lo que la
+métrica está pensada para avisar).
+
+**Fix**: como toda la fila (no solo el Price Spread — también el Spread
+APR, que es el número principal del ranking) es basura cuando dos piernas
+son activos sin relación, no basta con ocultar una columna. Se añadió
+`has_implausible_price_pair()` en `core/opportunities.py` — mismo patrón
+que `has_dead_liquidity()` (una función que solo pregunta "¿se descarta?",
+y es la página Streamlit quien filtra y enseña por qué, sin tirar datos en
+silencio) — con un umbral `IMPLAUSIBLE_PRICE_PAIR_PCT = 75.0` elegido
+directamente de estos datos reales: todo lo confirmado como choque de
+símbolos salió ≥ 87% (HK50, el caso más bajo); todo lo que parece
+divergencia real salió ≤ 41% (CAKE, el caso más alto). 75% deja margen de
+sobra a los dos lados. Se aplica en `pages/1_Funding_Rates.py` ANTES de
+pedir OI Depth (top N), para no gastar esas llamadas en oportunidades que
+ya son basura de raíz, con un aviso + panel de diagnóstico nuevo (mismo
+estilo que el de OI $0) que enseña qué se descartó y por qué. Verificado
+con un test que usa los valores EXACTOS del panel real (CAT, RTX, HK50,
+XIAOMI, PURR se descartan; CAKE, BERA, APEX, NEIRO se conservan).
+
+**Hallazgo secundario, no tocado todavía (bajo impacto)**: el conector de
+Lighter (`connectors/dex_lighter.py`) guarda `raw_symbol=str(market_id)` —
+un ID numérico interno ("20", "86"...) en vez de un ticker legible. No
+causa el bug de arriba (el campo `symbol`, que es el que se usa para
+emparejar oportunidades, sí viene correcto — "BERA", "APEX"), pero hace
+que el nuevo panel de diagnóstico enseñe cosas como `raw=20` para Lighter,
+que no dice nada por sí solo. Cosmético por ahora, pendiente si molesta en
+la práctica.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

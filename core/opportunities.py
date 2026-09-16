@@ -234,6 +234,57 @@ def has_dead_liquidity(opp: OpportunityRow) -> bool:
     return opp.oi_long_usd == 0 or opp.oi_short_usd == 0
 
 
+# Bug real encontrado en producción (2026-09-16): el panel de diagnóstico
+# "Price Spread más alto" (pages/1_Funding_Rates.py) sacó a la luz que
+# algunos pares que compute_opportunities() empareja por tener el mismo
+# ticker corto normalizado NO son el mismo activo en las dos piernas —
+# solo COINCIDEN en el nombre. Ejemplos reales, con raw_symbol/mark_price
+# de cada pierna (ver README):
+#
+#   - "CAT": Caterpillar Inc. tokenizada en bitget (raw="CAT/USDT:USDT",
+#     mark_price=$785.85) frente a un memecoin sin ninguna relación
+#     también llamado "CAT" en mexc (raw="CAT_USDT",
+#     mark_price=$0.000001946) — más de 400 millones de veces más barato.
+#   - "RTX": Raytheon Technologies en gate ($197.64, el precio real de la
+#     acción) frente a otra cosa completamente distinta en aster ($0.71).
+#   - "HK50": el índice Hang Seng — mexc lo cotiza en 24638.7 (su nivel
+#     real de mercado en esa fecha) mientras que gate lo cotiza en 3143.0.
+#   - "XIAOMI" y "PURR" (ratios de 7-110x entre piernas) también entran en
+#     este patrón, aunque con menos certeza sobre cuál es el activo real.
+#
+# Cuando pasa esto, TODA la fila es basura — el Spread APR también está
+# comparando el funding rate de dos activos sin relación, no solo el
+# Price Spread — así que no basta con ocultar una columna con
+# IMPLAUSIBLE_SPREAD_PCT (core/scoring.py; ese umbral, 1000%, está
+# calibrado para casos todavía más extremos, ver su propio docstring): hay
+# que sacar la oportunidad ENTERA del ranking, igual que ya se hace con
+# has_dead_liquidity() para el OI $0 confirmado — mismo patrón a propósito
+# (una función que solo pregunta "¿se descarta?", y es quien llama —
+# pages/1_Funding_Rates.py — quien filtra Y enseña por qué en un panel de
+# diagnóstico, para no tirar datos en silencio).
+#
+# El umbral de abajo sale directamente de los datos reales de ese mismo
+# panel de diagnóstico (ver README para la lista completa): TODO lo
+# confirmado como choque de símbolos salió >= 87% (HK50, el caso más
+# bajo); TODO lo que parece divergencia real del mismo activo en un
+# mercado poco líquido salió <= 41% (CAKE, el caso más alto de esa otra
+# categoría). 75% deja margen de sobra a los dos lados sin depender de un
+# número pegado al límite de ninguno de los dos grupos.
+IMPLAUSIBLE_PRICE_PAIR_PCT = 75.0
+
+
+def has_implausible_price_pair(opp: OpportunityRow) -> bool:
+    """
+    True si el Price Spread de esta oportunidad es tan alto que, con la
+    evidencia real de producción (ver el comentario de arriba de
+    IMPLAUSIBLE_PRICE_PAIR_PCT), es mucho más probable que las dos piernas
+    sean dos activos DISTINTOS que casualmente comparten el mismo ticker
+    normalizado, que una divergencia de precio real del mismo activo entre
+    dos exchanges.
+    """
+    return opp.price_spread_pct is not None and opp.price_spread_pct > IMPLAUSIBLE_PRICE_PAIR_PCT
+
+
 def enrich_oi_depth(opportunities: list[OpportunityRow], top_n: int = 10) -> dict[OiTarget, str]:
     """
     Atajo sin caché: collect + fetch + apply en un solo paso. Pensado para el

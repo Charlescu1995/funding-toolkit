@@ -24,6 +24,7 @@ from core.opportunities import (
     compute_opportunities,
     fetch_oi_for_targets,
     has_dead_liquidity,
+    has_implausible_price_pair,
 )
 
 # Cuántas oportunidades (de arriba del ranking) se enriquecen con OI Depth
@@ -203,6 +204,7 @@ st.divider()
 # ---------- Tabs: Ranking / Matriz / Histórico ----------
 oi_errors: dict[tuple[str, str], str] = {}  # se rellena en la pestaña Ranking, se enseña en Diagnóstico
 dead_liquidity: list = []  # idem — oportunidades descartadas por OI $0 confirmado (ver has_dead_liquidity)
+implausible_pairs: list = []  # idem — descartadas por Price Spread implausible (ver has_implausible_price_pair)
 tab_ranking, tab_matrix, tab_history = st.tabs(["🏆 Ranking", "🔲 Matriz", "📈 Histórico"])
 
 with tab_ranking:
@@ -217,6 +219,25 @@ with tab_ranking:
     if not opportunities:
         st.info("Ningún símbolo está presente en 2+ exchanges con los filtros actuales — no hay spread que calcular.")
     else:
+        # Ver core/opportunities.py::has_implausible_price_pair — bug real
+        # encontrado en producción (2026-09-16, confirmado con raw_symbol/
+        # mark_price reales: "CAT" = Caterpillar Inc. en bitget a $785.85
+        # frente a un memecoin sin relación también llamado "CAT" en mexc a
+        # $0.000001946). Se descarta ANTES de pedir OI Depth (top N) para no
+        # gastar esas llamadas en oportunidades que ya son basura de raíz —
+        # el "Símbolo" coincide mismo por casualidad, no son el mismo activo.
+        implausible_pairs = [o for o in opportunities if has_implausible_price_pair(o)]
+        opportunities = [o for o in opportunities if not has_implausible_price_pair(o)]
+
+        if implausible_pairs:
+            symbols_implausible = ", ".join(sorted({o.symbol for o in implausible_pairs}))
+            st.caption(
+                f"⚠️ {len(implausible_pairs)} oportunidad(es) descartada(s) del ranking por Price "
+                f"Spread demasiado alto para ser el mismo activo ({symbols_implausible}) — probable "
+                "choque de símbolos entre dos activos sin relación que comparten el mismo ticker "
+                "corto normalizado. Detalle en el diagnóstico de abajo."
+            )
+
         # OI Depth real para las mejores oportunidades: los CEX no lo traen
         # en el fetch masivo de funding rates (ccxt no expone un endpoint
         # bulk para eso), así que se pide aparte, solo para el top N y con
@@ -243,8 +264,8 @@ with tab_ranking:
 
         if not opportunities:
             st.info(
-                "Todas las oportunidades del top se descartaron por Open Interest $0 confirmado — "
-                "ver el aviso de arriba."
+                "Todas las oportunidades del top se descartaron — ver los avisos de arriba (Open "
+                "Interest $0 confirmado y/o Price Spread implausible)."
             )
 
         df = pd.DataFrame(
@@ -379,6 +400,28 @@ if dead_liquidity:
                     "spread_apr_descartado": f"{o.spread_apr:.1f}%",
                 }
                 for o in dead_liquidity
+            ]
+        )
+
+if implausible_pairs:
+    with st.expander(
+        f"Diagnóstico: {len(implausible_pairs)} oportunidad(es) descartada(s) por Price Spread implausible"
+    ):
+        st.caption(
+            "Ver core/opportunities.py::has_implausible_price_pair. Símbolo real (raw_symbol) y "
+            "mark_price de cada pierna — si son de órdenes de magnitud muy distintos (como aquí "
+            "abajo) casi seguro son dos activos sin relación que comparten el mismo ticker corto, "
+            "no el mismo activo con una divergencia real."
+        )
+        st.json(
+            [
+                {
+                    "símbolo (normalizado)": o.symbol,
+                    "long": f"{o.long_exchange} · raw={o.long_raw_symbol} · mark_price={o.long_mark_price}",
+                    "short": f"{o.short_exchange} · raw={o.short_raw_symbol} · mark_price={o.short_mark_price}",
+                    "price_spread_pct": f"{o.price_spread_pct:.2f}%",
+                }
+                for o in sorted(implausible_pairs, key=lambda o: o.price_spread_pct, reverse=True)
             ]
         )
 

@@ -829,6 +829,61 @@ columna es o 100% numérica o 100% texto, nunca una mezcla que rompa el
 ordenado. `_fmt_usd()` se mantiene solo para los paneles de diagnóstico
 (`st.json`), que no son tablas ordenables.
 
+**[BUG REAL encontrado en producción, corregido] Escala de OI/Volumen de
+GRVT (÷1e9 aplicado donde no tocaba)** — Un usuario reportó, con capturas de
+un despliegue real, tres cosas a la vez en filas donde GRVT era una de las
+dos piernas: (1) Price Spread de ~100.000.000.000% ("una bestialidad, no
+creo que sea cierto"), y (2)(3) OI/Volumen con decenas de decimales para
+valores prácticamente cero (ej. `0,00000000000079` en el OI de KPEPE). Causa
+raíz: el conector de GRVT (`connectors/dex_grvt.py`) aplicaba el mismo
+`PRICE_SCALE = 1e9` (el divisor correcto para `mark_price`) a
+`open_interest` y a `buy/sell_volume_24h_q` — el propio docstring del módulo
+ya llevaba desde una sesión anterior marcando esto como una asunción sin
+confirmar. Se releyó hoy, campo por campo (no el JSON de ejemplo de la
+página, ya antes demostrado no fiable numéricamente), la documentación
+oficial en vivo de GRVT
+(https://api-docs.grvt.io/schemas/api_ticker_response/ y
+`api_get_all_instruments_response/`): los precios (`mark_price`,
+`index_price`, etc.) SÍ están "expressed in `9` decimals" de forma uniforme
+para todos los instrumentos — esa parte estaba bien — pero `open_interest`
+está "expressed in **base asset decimal units**" y
+`buy_volume_24h_q`/`sell_volume_24h_q` en "**quote asset decimal units**":
+escalas que dependen de los campos `base_decimals`/`quote_decimals` que
+`all_instruments` ya trae POR INSTRUMENTO, no de `PRICE_SCALE`. BTC/ETH
+tienen `base_decimals = 9` (según el propio SDK oficial de GRVT), así que
+coincidían con `PRICE_SCALE` por pura casualidad y el bug quedó invisible
+hasta que aparecieron altcoins de precio bajo como KPEPE en el ranking, con
+un `base_decimals` bien distinto de 9. **Arreglado**: `base_decimals` y
+`quote_decimals` se leen del mismo `all_instruments` que ya se pedía (sin
+llamada de red extra) y se usan para escalar OI/Volumen; si un instrumento
+no los trae, su OI/Volumen se deja en `None` en vez de adivinar un divisor.
+`mark_price` no cambia (su escala uniforme ya estaba confirmada y sigue
+correcta). Cubierto por tests sintéticos con datos de ticker mockeados
+(BTC con `base_decimals=9`, coincide con el comportamiento anterior; un caso
+tipo-KPEPE con `base_decimals=0`, demuestra que con el bug viejo el OI salía
+~1.000.000 de veces más pequeño que el real; y un caso sin
+`base_decimals`/`quote_decimals`, confirma que se deja en `None` en vez de
+inventar). Además, de paso, la misma pasada de documentación reveló que
+`funding_rate_8h_curr`/`funding_rate_8h_avg` (los campos que este conector
+lee para el funding rate) están marcados **DEPRECATED** en el esquema
+actual de GRVT, con un campo nuevo `funding_rate` (misma unidad,
+centibeeps) reemplazándolos — se cambió el conector para probar el nuevo
+primero y caer a los antiguos como compatibilidad, para no quedarnos sin
+datos de golpe el día que GRVT retire los deprecated.
+
+Sobre el Price Spread disparatado en sí: como la escala de `mark_price`
+salió confirmada correcta (no es lo que causaba el ~100.000.000.000%), no
+se tocó esa parte del cálculo. Como red de seguridad — este mismo conector
+ya había demostrado una vez que la documentación de GRVT puede no coincidir
+con la realidad en vivo — se añadió una guardia de cordura en
+`core/scoring.py::price_spread()`: por encima de `IMPLAUSIBLE_SPREAD_PCT`
+(1000%, ya inalcanzable entre precios reales del mismo activo en dos
+exchanges) el resultado se descarta a `None` ("—" en la interfaz) en vez de
+enseñar un número que ni el propio proyecto se cree, en vez de intentar
+"corregir" un valor sin evidencia real que lo respalde. Aplica a nivel de
+`core/scoring.py`, no solo a GRVT, así que protege contra el mismo tipo de
+fallo si aparece en cualquier otro conector en el futuro.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

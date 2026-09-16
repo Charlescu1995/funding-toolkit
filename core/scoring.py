@@ -50,6 +50,23 @@ entre CEX grandes en el mismo símbolo, pero puede dispararse en símbolos poco
 líquidos o en RWA (acciones/oro tokenizado), donde cada exchange puede llevar
 su propio índice de precio. Por eso Kusi/Smartbitrage lo tratan como un dato
 de riesgo aparte del spread de funding, no como parte del mismo número.
+
+--- Guardia de cordura (BUG REAL encontrado en producción, Paso 6) ---
+Un usuario reportó en producción un Price Spread de ~100.000.000.000% (cien
+mil millones por ciento) en filas con GRVT como pierna, con el comentario
+"no creo que sea cierto" — con razón: ningún par de precios reales del MISMO
+activo entre dos exchanges se separa ni remotamente a ese orden de magnitud.
+La causa raíz identificada fue un bug de escala en open_interest/volumen del
+conector de GRVT (ver connectors/dex_grvt.py, sección "BUG REAL" del
+docstring) — pero ese conector ya ha demostrado una vez que la documentación
+de un exchange puede no coincidir con la realidad en vivo, así que en vez de
+confiar ciegamente en que ningún conector (presente o futuro) vaya a repetir
+un fallo de escala parecido en el propio mark_price, price_spread() aplica
+una red de seguridad: por encima de IMPLAUSIBLE_SPREAD_PCT se descarta el
+resultado (spread_pct=None, se ve como "—"/"s/d" en la interfaz) en vez de
+enseñar un número que ni el propio proyecto se cree. No es un intento de
+"corregir" el dato — es preferir no mostrar nada antes que mostrar basura,
+mismo criterio que el resto del proyecto usa para OI/volumen ausente.
 """
 
 from __future__ import annotations
@@ -62,6 +79,13 @@ from core.normalize import NormalizedRate
 
 DEFAULT_WINDOW_HOURS = 24 * 30  # 30 días, igual que la ventana más larga del histórico
 MIN_SAMPLES_FOR_SCORE = 20      # con menos snapshots que esto, no publicamos un score
+
+# Ver nota "Guardia de cordura" al final del docstring del módulo. 1000% ya
+# es un long_price ~11 veces más barato que el short_price del mismo activo
+# — inalcanzable entre dos precios reales del mismo mercado, así que por
+# encima de esto se asume bug de datos (escala/decimales, símbolo mal
+# emparejado) antes que un coste de entrada real.
+IMPLAUSIBLE_SPREAD_PCT = 1000.0
 
 
 @dataclass
@@ -167,12 +191,17 @@ def price_spread(long_rate: NormalizedRate, short_rate: NormalizedRate) -> Price
     intervalo.
 
     None cuando a cualquiera de las dos piernas le falta el mark_price (pasa,
-    p.ej., si algún conector no lo trae) o cuando el precio long es 0 — no se
-    inventa un número, se deja como "—" en la interfaz, igual que con OI.
+    p.ej., si algún conector no lo trae), cuando el precio long es 0, o
+    cuando el resultado supera IMPLAUSIBLE_SPREAD_PCT (ver nota "Guardia de
+    cordura" en el docstring del módulo) — no se inventa ni se enseña un
+    número que no nos creemos, se deja como "—" en la interfaz, igual que
+    con OI/volumen ausente.
     """
     long_price = long_rate.mark_price
     short_price = short_rate.mark_price
     if long_price is None or short_price is None or long_price == 0:
         return PriceSpread(long_price=long_price, short_price=short_price, spread_pct=None)
     spread_pct = abs(short_price - long_price) / long_price * 100
+    if spread_pct > IMPLAUSIBLE_SPREAD_PCT:
+        return PriceSpread(long_price=long_price, short_price=short_price, spread_pct=None)
     return PriceSpread(long_price=long_price, short_price=short_price, spread_pct=spread_pct)

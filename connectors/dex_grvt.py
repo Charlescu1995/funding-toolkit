@@ -140,6 +140,79 @@ primer número de volumen que devuelva este conector en producción es el
 candidato a comparar contra la interfaz oficial de GRVT, igual que ya se
 hizo con `funding_rate_8h_curr` y como sigue pendiente con el resto de
 escalas.
+
+--- BUG REAL encontrado en producción, corregido (Paso 6, tras reporte del
+    usuario: "el Price Spread es una bestialidad" + OI/Volumen con
+    decenas de decimales para valores cercanos a cero, en TODAS las filas
+    donde grvt es una de las dos piernas) ---
+
+La asunción de arriba ("se aplica la MISMA escala ÷1e9 a todo, incluido
+open_interest y volumen, porque no se pudo confirmar lo contrario") era la
+causa. Se releyó hoy (2026-09-16), campo por campo, la documentación oficial
+en vivo — no el ejemplo JSON de la página (ya demostrado no fiable
+numéricamente más arriba en este mismo docstring), sino el TEXTO de cada
+campo, vía WebFetch contra:
+
+  - https://api-docs.grvt.io/schemas/api_ticker_response/
+  - https://api-docs.grvt.io/schemas/api_get_all_instruments_response/
+
+Y el texto es inequívoco, campo por campo:
+
+  - `mark_price`, `index_price`, `last_price`, `mid_price`,
+    `best_bid_price`, `best_ask_price`, `high_price`, `low_price`,
+    `open_price`, `forward_price`: TODOS "expressed in `9` decimals", sin
+    excepción por instrumento. Es decir: la escala de PRECIOS sí es
+    uniforme ÷1e9 para todos los instrumentos — esa parte de la asunción
+    original era correcta, no ha cambiado.
+  - `open_interest`, `last_size`, `best_bid_size`, `best_ask_size`,
+    `buy_volume_24h_b`, `sell_volume_24h_b`: "expressed in **base asset
+    decimal units**" — NO la escala de precio. La unidad real depende del
+    campo `base_decimals` que trae `all_instruments` por instrumento
+    ("the smallest denomination of the base asset supported by GRVT (+3
+    represents 0.001, -3 represents 1000, 0 represents 1)").
+  - `buy_volume_24h_q` / `sell_volume_24h_q`: "expressed in **quote asset
+    decimal units**" — el campo `quote_decimals` correspondiente, misma
+    idea que `base_decimals` pero para el activo de cotización (USDT).
+
+O sea: aplicar ÷1e9 a `open_interest` y a `buy/sell_volume_24h_q` estaba
+mal para cualquier instrumento cuyo `base_decimals`/`quote_decimals` no
+fuera casualmente 9 — y BTC/ETH sí lo son (según el propio SDK oficial de
+GRVT, que usa un multiplicador de fallback de 1e9 específicamente para
+"BTC_ETH", ver `grvt_ccxt_utils.py` del SDK), lo que explica por qué el bug
+llevaba semanas invisible: los pares con BTC/ETH como pierna salían bien
+por pura coincidencia de escala, y los primeros símbolos de baja
+capitalización que aparecieron en el ranking (KPEPE y similares) fueron los
+que lo delataron con OI/Volumen prácticamente cero (de dividir por 1e9 de
+más) y, en consecuencia, un Price Spread disparatado (si algo más en la
+cadena de cálculo llegaba a depender de ese OI casi-cero — ver más abajo
+sobre por qué el precio en sí NO era la causa de eso).
+
+**Corrección aplicada**: `base_decimals` y `quote_decimals` se leen del
+MISMO `all_instruments` que ya se pedía (no hace falta ninguna llamada de
+red extra), uno por instrumento, y se usan así:
+
+    oi_base_units    = open_interest_raw / 10**base_decimals
+    oi_usd            = oi_base_units * mark_price          # mark_price sigue ÷1e9, sin cambios
+    volume_24h_usd    = (buy_volume_24h_q + sell_volume_24h_q) / 10**quote_decimals
+
+Si algún instrumento no trae `base_decimals`/`quote_decimals` en
+`all_instruments` (no debería pasar según el esquema, pero por si acaso),
+se deja el OI/Volumen de ESE instrumento en `None` en vez de asumir un
+divisor — mismo criterio de "no inventar" que el resto del proyecto.
+
+**Sobre el Price Spread disparatado en sí**: el mark_price NO estaba mal
+(su escala ÷1e9 es uniforme y está confirmada arriba), así que la
+corrección de OI/Volumen no lo toca. Como este mismo conector ya demostró
+una vez que la documentación de GRVT puede no coincidir con la realidad en
+vivo (ver el ejemplo numérico de `mark_price` de la propia página de docs,
+que contradice el formato real confirmado en producción), no se da por
+sentado que el precio esté libre de problemas solo porque el texto de la
+documentación lo diga — como red de seguridad adicional, `price_spread()`
+en `core/scoring.py` ahora descarta (devuelve `None`, se ve como "—" en la
+interfaz) cualquier spread por encima de un umbral que ya es imposible para
+dos precios reales del mismo activo, en vez de mostrar un porcentaje que no
+nos creemos ni nosotros. Ver el docstring de esa función para el umbral
+exacto y el razonamiento.
 """
 
 from __future__ import annotations
@@ -206,6 +279,12 @@ class GrvtConnector:
         # instrument (símbolo GRVT) -> intervalo en horas, si la respuesta
         # real trae el campo bajo alguno de estos nombres.
         interval_by_instrument: dict[str, float] = {}
+        # instrument -> base_decimals / quote_decimals, tal cual los trae
+        # all_instruments — ver nota "BUG REAL" en el docstring del módulo:
+        # esta es la escala real de open_interest / volumen 24h, NO el
+        # PRICE_SCALE de los precios.
+        base_decimals_by_instrument: dict[str, int] = {}
+        quote_decimals_by_instrument: dict[str, int] = {}
         instrument_names: list[str] = []
         for row in instruments:
             name = row.get("instrument")
@@ -219,6 +298,16 @@ class GrvtConnector:
                     except (TypeError, ValueError):
                         pass
                     break
+            if row.get("base_decimals") is not None:
+                try:
+                    base_decimals_by_instrument[name] = int(row["base_decimals"])
+                except (TypeError, ValueError):
+                    pass
+            if row.get("quote_decimals") is not None:
+                try:
+                    quote_decimals_by_instrument[name] = int(row["quote_decimals"])
+                except (TypeError, ValueError):
+                    pass
 
         if not instrument_names:
             # No devolvemos silenciosamente [] — eso es indistinguible de
@@ -270,11 +359,21 @@ class GrvtConnector:
 
                 # Ver docstring del módulo: el primer despliegue con diagnóstico
                 # reveló que el campo real NO es "funding_rate_curr" (lo que
-                # decía la documentación/SDK), sino "funding_rate_8h_curr" — se
-                # deja "funding_rate_curr" como segundo intento por si algún
-                # instrumento lo trae con el nombre antiguo, pero el real es
-                # el primero.
-                rate_raw = ticker.get("funding_rate_8h_curr", ticker.get("funding_rate_curr"))
+                # decía la documentación/SDK), sino "funding_rate_8h_curr". Hoy
+                # (2026-09-16), releyendo la documentación oficial en vivo para
+                # el bug de escala de OI/Volumen, se confirmó que
+                # `funding_rate_8h_curr`/`funding_rate_8h_avg` están marcados
+                # DEPRECATED en el esquema actual, y existe un campo nuevo
+                # `funding_rate` ("the current indicative funding rate for the
+                # active interval, expressed in centibeeps" — misma unidad, así
+                # que la conversión ÷CENTIBEEPS_TO_DECIMAL de abajo sigue
+                # aplicando sin cambios). Se prueba el nuevo primero y se cae a
+                # los antiguos por compatibilidad, en vez de esperar a que GRVT
+                # retire el campo deprecated y rompa el conector sin avisar.
+                rate_raw = ticker.get(
+                    "funding_rate",
+                    ticker.get("funding_rate_8h_curr", ticker.get("funding_rate_curr")),
+                )
                 if rate_raw is None:
                     if len(unparsed_samples) < 3:
                         # Aquí sí encontramos un "ticker", pero sin el campo
@@ -288,29 +387,33 @@ class GrvtConnector:
                     float(mark_price_raw) / PRICE_SCALE if mark_price_raw is not None else None
                 )
 
+                # Ver nota "BUG REAL" en el docstring del módulo: open_interest
+                # NO usa la escala de precio (PRICE_SCALE) — usa base_decimals,
+                # por instrumento, tal cual lo confirma la documentación oficial
+                # ("expressed in base asset decimal units"). Si este instrumento
+                # concreto no trajo base_decimals en all_instruments, se deja
+                # el OI en None en vez de adivinar un divisor.
                 oi_raw = ticker.get("open_interest")
+                base_decimals = base_decimals_by_instrument.get(name)
                 oi_usd = None
-                if oi_raw is not None and mark_price is not None:
+                if oi_raw is not None and mark_price is not None and base_decimals is not None:
                     try:
-                        # Ver nota de escala en el docstring del módulo: se
-                        # asume el mismo punto fijo ÷ 1e9 que el resto de
-                        # campos numéricos de GRVT, sin confirmar en vivo.
-                        oi_base_units = float(oi_raw) / PRICE_SCALE
+                        oi_base_units = float(oi_raw) / (10 ** base_decimals)
                         oi_usd = oi_base_units * mark_price
                     except (TypeError, ValueError):
                         oi_usd = None
 
-                # Ver docstring del módulo (nota de volumen 24h): se suman
-                # comprador + vendedor del lado "_q" (quote asset = USD para
-                # estos instrumentos), con la misma escala ÷1e9 que el resto
-                # de campos numéricos de GRVT (asunción, no confirmada contra
-                # un valor real — ver docstring).
+                # Mismo caso que open_interest, pero con quote_decimals (la
+                # documentación oficial dice "expressed in quote asset decimal
+                # units" para buy_volume_24h_q/sell_volume_24h_q — ver nota
+                # "BUG REAL" en el docstring del módulo).
                 buy_q_raw = ticker.get("buy_volume_24h_q")
                 sell_q_raw = ticker.get("sell_volume_24h_q")
+                quote_decimals = quote_decimals_by_instrument.get(name)
                 volume_24h_usd = None
-                if buy_q_raw is not None and sell_q_raw is not None:
+                if buy_q_raw is not None and sell_q_raw is not None and quote_decimals is not None:
                     try:
-                        volume_24h_usd = (float(buy_q_raw) + float(sell_q_raw)) / PRICE_SCALE
+                        volume_24h_usd = (float(buy_q_raw) + float(sell_q_raw)) / (10 ** quote_decimals)
                     except (TypeError, ValueError):
                         volume_24h_usd = None
 

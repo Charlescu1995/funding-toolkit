@@ -234,6 +234,39 @@ def has_dead_liquidity(opp: OpportunityRow) -> bool:
     return opp.oi_long_usd == 0 or opp.oi_short_usd == 0
 
 
+def has_zero_volume_leg(opp: OpportunityRow) -> bool:
+    """
+    True si el volumen de 24h de una de las dos piernas es CONFIRMADO
+    exactamente $0 — no que no se haya podido consultar (eso es `None`, y
+    se deja tal cual, como "—" en la interfaz), sino que el propio
+    exchange respondió que en las últimas 24h no se movió absolutamente
+    nada en ese mercado.
+
+    Encontrado en producción (2026-09-16, mismo día que el bug de choque de
+    símbolos de arriba): el usuario reportó "¿qué ha pasado con APEX?" y
+    "he buscado CAKE en Extended y no sale" al ver la tabla de Ranking.
+    Revisando los datos: "CAKE" (mexc/extended), "BERA" (lighter/extended)
+    y "APEX" (lighter/extended) tenían, los tres, la pierna de Extended con
+    un Open Interest mínimo pero NO exactamente $0 (41, 64 y 810 dólares
+    respectivamente — por eso `has_dead_liquidity()` no los pillaba, ese
+    filtro exige el $0 exacto) y Vol 24h EXACTAMENTE $0. El usuario
+    confirmó contra la interfaz real de Extended que "CAKE" ni siquiera
+    aparece listado ahí — no es un mercado real y operable, es el mismo
+    patrón "fantasma" ya visto con Aster/STORJ (ver has_dead_liquidity),
+    solo que aquí lo delata el volumen en vez del OI. A diferencia del OI
+    Depth (que solo se pide para el top N por una llamada aparte), el
+    volumen de 24h de Extended ya viene directo en el fetch masivo (ver
+    connectors/dex_extended.py), así que este filtro se puede aplicar a
+    TODAS las oportunidades sin gastar ninguna llamada extra.
+
+    Un mercado sin ningún volumen en 24h no es una oportunidad ejecutable
+    de verdad por mucho que el spread de APR salga enorme — nadie se ha
+    movido ahí en todo un día. Se usa para sacar del ranking esas filas
+    "fantasma", mismo criterio que has_dead_liquidity().
+    """
+    return opp.volume_long_usd == 0 or opp.volume_short_usd == 0
+
+
 # Bug real encontrado en producción (2026-09-16): el panel de diagnóstico
 # "Price Spread más alto" (pages/1_Funding_Rates.py) sacó a la luz que
 # algunos pares que compute_opportunities() empareja por tener el mismo

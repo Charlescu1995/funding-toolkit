@@ -1074,6 +1074,43 @@ que el nuevo panel de diagnóstico enseñe cosas como `raw=20` para Lighter,
 que no dice nada por sí solo. Cosmético por ahora, pendiente si molesta en
 la práctica.
 
+**Actualización — nuevo bug real, distinto: mercados fantasma en Extended
+(no relacionado con el choque de símbolos de arriba).** Con el fix
+anterior ya desplegado, el usuario preguntó "¿qué ha pasado con APEX?" y
+dijo "he buscado CAKE en Extended y no sale", mirando la tabla de Ranking
+(CAKE, BERA y APEX seguían arriba del todo — ya no por choque de símbolos,
+esos se descartaron bien, sino por otra cosa). Revisando los datos que ya
+traía la tabla: las tres tenían la pierna de **Extended** con un Open
+Interest mínimo pero NO exactamente $0 (CAKE: $41, BERA: $64, APEX: $810 —
+por eso `has_dead_liquidity()` no las pillaba, exige el $0 exacto) y **Vol
+24h exactamente $0**. El usuario confirmó contra la interfaz REAL de
+Extended que "CAKE" ni siquiera aparece listado ahí — no es un mercado
+real y operable, es el mismo patrón "fantasma" ya conocido de Aster/STORJ
+(ver más arriba en este README), solo que aquí lo delata el volumen en vez
+del OI, y en un exchange distinto.
+
+**Fix**: se añadió `has_zero_volume_leg()` en `core/opportunities.py`,
+mismo patrón exacto que `has_dead_liquidity()` — descarta cualquier
+oportunidad con Vol 24h CONFIRMADO en $0 en una de las dos piernas (no
+`None`, que es "no se pudo consultar" y se deja tal cual). A diferencia
+del OI Depth, el volumen de 24h de Extended ya viene directo en el fetch
+masivo (no hace falta ninguna llamada aparte), así que se aplica a TODAS
+las oportunidades sin coste extra, con su propio aviso + panel de
+diagnóstico en `pages/1_Funding_Rates.py` (mismo estilo que el de OI $0).
+Verificado con un test que usa los valores EXACTOS que vio el usuario
+(CAKE/BERA/APEX se descartan; `None` sin consultar y volumen real en
+ambas piernas NO se descartan).
+
+Esto es un parche corriente abajo, no la causa raíz: puede que el propio
+endpoint de Extended traiga un campo de estado (tipo "status"/"active"/
+"tradingEnabled") que señale que el mercado está inactivo, igual que ccxt
+expone `active` para el caso de Aster — y que el conector de Extended
+(que es propio, no ccxt) simplemente no lo esté mirando todavía. Se añadió
+un diagnóstico (`logger.warning` en `connectors/dex_extended.py`) que
+vuelca la fila CRUDA completa (todos los campos) para hasta 6 mercados con
+Vol 24h calculado = $0 — pendiente de un despliegue más para confirmar si
+hay un campo así y filtrar en el origen, igual que ya se hace con Aster.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

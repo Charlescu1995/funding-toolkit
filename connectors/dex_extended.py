@@ -21,10 +21,31 @@ campos de volumen de 24h — `dailyVolume` (ej. XRP-USD en vivo:
 price:
 
     volume_24h_usd = dailyVolume   (directo, sin conversión)
+
+--- Mercados fantasma sospechados (bug real reportado en producción, 2026-09-16) ---
+
+El usuario vio en el ranking "CAKE" (mexc/extended), "BERA" (lighter/extended)
+y "APEX" (lighter/extended) con la pierna de Extended mostrando un Open
+Interest mínimo (decenas/cientos de $) y Vol 24h EXACTAMENTE $0, y confirmó
+contra la interfaz real de Extended que "CAKE" ni siquiera aparece listado
+ahí — parece el mismo patrón de mercado "fantasma" ya conocido con Aster/
+STORJ (ver README y core/opportunities.py::has_dead_liquidity), solo que aquí
+el OI no llega a ser exactamente $0 así que solo el volumen lo delata. Ya se
+descartan del ranking (ver has_zero_volume_leg en core/opportunities.py), pero
+eso es un parche corriente abajo, no arregla la causa raíz: puede que este
+mismo endpoint bulk traiga un campo de estado (algo tipo "status"/"active"/
+"tradingEnabled" en `row` o en `marketStats`) que señale que el mercado está
+inactivo/delistado, igual que ccxt expone `active` para Aster — y que
+simplemente no se esté mirando todavía. Se añadió un diagnóstico
+(`logger.warning`, ver más abajo) que vuelca la fila CRUDA completa (todos
+los campos, no solo los que ya se usan) para hasta 6 mercados con Vol 24h
+calculado = $0, pendiente de un despliegue más para confirmarlo con datos
+reales antes de filtrar en el origen en vez de corriente abajo.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 
 import requests
@@ -54,6 +75,26 @@ class ExtendedConnector:
         payload = resp.json()
         rows = payload.get("data", [])
 
+        # Diagnóstico (2026-09-16): el usuario reportó "¿qué ha pasado con
+        # APEX?" y "he buscado CAKE en Extended y no sale" — CAKE/BERA/APEX
+        # traían, los tres, OI mínimo-pero-no-cero y Vol 24h exactamente $0
+        # en la pierna de Extended (ver has_zero_volume_leg en
+        # core/opportunities.py, ya se descartan del ranking). El usuario
+        # confirmó contra la interfaz real de Extended que "CAKE" ni
+        # siquiera aparece listado ahí -- mismo patrón "fantasma" que
+        # Aster/STORJ (README), pero para ese caso el conector de ccxt SÍ
+        # tiene un campo `active`/estado que lo detecta en origen (ver
+        # cex_ccxt.py). Extended es un conector propio (no ccxt) y hasta
+        # ahora no comprobaba ningún campo de estado -- puede que
+        # `marketStats`/`row` sí traiga uno (ej. "status"/"active"/
+        # "tradingEnabled") y simplemente no se estuviera mirando. Se
+        # vuelca aquí la fila CRUDA completa (todos los campos, no solo los
+        # que ya usamos) para hasta 6 mercados con esta firma sospechosa
+        # (Vol 24h calculado = 0), para poder comparar contra la respuesta
+        # real y encontrar el campo correcto en vez de seguir adivinando
+        # solo por el síntoma downstream.
+        ghost_diagnostic_samples: list[dict] = []
+
         out: list[FundingRate] = []
         for row in rows:
             if row.get("type") not in (None, "PERPETUAL"):
@@ -77,6 +118,9 @@ class ExtendedConnector:
             volume_24h_raw = stats.get("dailyVolume")
             volume_24h_usd = float(volume_24h_raw) if volume_24h_raw is not None else None
 
+            if volume_24h_usd == 0 and len(ghost_diagnostic_samples) < 6:
+                ghost_diagnostic_samples.append(row)
+
             out.append(
                 FundingRate(
                     exchange="extended",
@@ -90,6 +134,16 @@ class ExtendedConnector:
                     open_interest_usd=oi_usd,
                     volume_24h_usd=volume_24h_usd,
                 )
+            )
+
+        if ghost_diagnostic_samples:
+            logger.warning(
+                "extended DIAGNÓSTICO %d mercado(s) con Vol 24h calculado = $0 (posible fantasma, "
+                "ver docstring más arriba y has_zero_volume_leg en core/opportunities.py) — fila "
+                "CRUDA completa tal cual la API, para buscar un campo de estado que no se esté "
+                "mirando todavía: %s",
+                len(ghost_diagnostic_samples),
+                json.dumps(ghost_diagnostic_samples)[:4000],
             )
 
         return out

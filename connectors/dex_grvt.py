@@ -217,6 +217,7 @@ exacto y el razonamiento.
 
 from __future__ import annotations
 
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -286,11 +287,22 @@ class GrvtConnector:
         base_decimals_by_instrument: dict[str, int] = {}
         quote_decimals_by_instrument: dict[str, int] = {}
         instrument_names: list[str] = []
+        # Diagnóstico (ver más abajo, tras el bucle de tickers, y el docstring
+        # del módulo — sección "BUG REAL, segunda vuelta"): guardamos el JSON
+        # crudo de unas pocas filas de all_instruments TAL CUAL, sin filtrar
+        # por nombre de campo, para poder ver en los logs si base_decimals/
+        # quote_decimals realmente se llaman así en la respuesta real o si
+        # (como ya pasó una vez con funding_rate_curr) la documentación no
+        # coincide con lo que devuelve la API en producción.
+        raw_instrument_samples: list[dict] = []
         for row in instruments:
             name = row.get("instrument")
             if name is None:
                 continue
             instrument_names.append(name)
+            if len(raw_instrument_samples) < 3 or "BTC" in name:
+                if len(raw_instrument_samples) < 6:
+                    raw_instrument_samples.append(row)
             for key in ("funding_interval_hours", "fundingIntervalHours", "fi"):
                 if row.get(key) is not None:
                     try:
@@ -308,6 +320,16 @@ class GrvtConnector:
                     quote_decimals_by_instrument[name] = int(row["quote_decimals"])
                 except (TypeError, ValueError):
                     pass
+
+        logger.warning(
+            "grvt DIAGNÓSTICO all_instruments: %d instrumentos, %d con base_decimals reconocido, "
+            "%d con quote_decimals reconocido. Muestra cruda (hasta 6 filas, JSON tal cual la API, "
+            "para comparar el nombre real de los campos contra la documentación): %s",
+            len(instrument_names),
+            len(base_decimals_by_instrument),
+            len(quote_decimals_by_instrument),
+            json.dumps(raw_instrument_samples, default=str)[:4000],
+        )
 
         if not instrument_names:
             # No devolvemos silenciosamente [] — eso es indistinguible de
@@ -331,6 +353,8 @@ class GrvtConnector:
         # desde este sandbox). Guardamos una muestra del payload crudo para
         # poder enseñarlo en el error si hace falta.
         unparsed_samples: dict[str, object] = {}
+        # Ver comentario más abajo, dentro del bucle, sobre cuándo se rellena.
+        ticker_diagnostic_samples: dict[str, dict] = {}
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             future_to_name = {
@@ -420,6 +444,33 @@ class GrvtConnector:
                 base = name.split("_")[0] if "_" in name else name
                 interval_hours = interval_by_instrument.get(name, FALLBACK_INTERVAL_HOURS)
 
+                # Diagnóstico (ver el warning consolidado tras el bucle, y el
+                # docstring del módulo): si el OI/volumen calculado sigue
+                # saliendo sospechosamente cercano a cero, o si no había
+                # base_decimals/quote_decimals para este instrumento, guardamos
+                # los valores crudos (antes de escalar) para poder comparar a
+                # mano contra la interfaz oficial de GRVT — sin esto, seguimos
+                # a ciegas sobre si el campo se llama distinto en producción o
+                # si la fórmula en sí está mal.
+                looks_broken = (
+                    (oi_usd is not None and 0 < oi_usd < 1.0)
+                    or (volume_24h_usd is not None and 0 < volume_24h_usd < 1.0)
+                    or base_decimals is None
+                    or quote_decimals is None
+                )
+                if looks_broken and len(ticker_diagnostic_samples) < 6:
+                    ticker_diagnostic_samples[name] = {
+                        "mark_price_raw": mark_price_raw,
+                        "mark_price_calculado": mark_price,
+                        "open_interest_raw": oi_raw,
+                        "base_decimals_encontrado": base_decimals,
+                        "oi_usd_calculado": oi_usd,
+                        "buy_volume_24h_q_raw": buy_q_raw,
+                        "sell_volume_24h_q_raw": sell_q_raw,
+                        "quote_decimals_encontrado": quote_decimals,
+                        "volume_24h_usd_calculado": volume_24h_usd,
+                    }
+
                 out.append(
                     FundingRate(
                         exchange="grvt",
@@ -434,6 +485,15 @@ class GrvtConnector:
                         volume_24h_usd=volume_24h_usd,
                     )
                 )
+
+        if ticker_diagnostic_samples:
+            logger.warning(
+                "grvt DIAGNÓSTICO ticker (%d instrumentos con OI/volumen sospechosamente "
+                "cercano a cero o sin base_decimals/quote_decimals — valores crudos ANTES "
+                "de escalar, para comparar a mano contra la interfaz oficial de GRVT): %s",
+                len(ticker_diagnostic_samples),
+                json.dumps(ticker_diagnostic_samples, default=str)[:4000],
+            )
 
         if not out:
             # Igual que arriba: si TODOS los tickers fallaron o vinieron

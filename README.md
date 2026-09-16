@@ -884,6 +884,43 @@ enseñar un número que ni el propio proyecto se cree, en vez de intentar
 `core/scoring.py`, no solo a GRVT, así que protege contra el mismo tipo de
 fallo si aparece en cualquier otro conector en el futuro.
 
+**Actualización — el fix de arriba NO resolvió el problema en producción.**
+Tras desplegar el cambio de `base_decimals`/`quote_decimals`, el usuario
+confirmó (descargó el zip, lo desplegó, reinició la app dos veces) que el OI
+y el volumen de GRVT seguían saliendo con la misma magnitud cercana a cero.
+Eso descarta la hipótesis de "está desplegando código viejo" y apunta a que
+la asunción tomada de la documentación oficial — que `all_instruments`
+expone `base_decimals`/`quote_decimals` con esos nombres exactos — puede no
+coincidir con lo que la API responde de verdad en producción, exactamente
+el mismo tipo de discrepancia que ya pasó una vez con
+`funding_rate_curr`/`funding_rate_8h_curr` en este mismo conector. Como
+este entorno de desarrollo no tiene salida de red hacia GRVT (ni siquiera
+`all_instruments`, que si es alcanzable desde el despliegue real), no hay
+forma de confirmar esto desde aquí sin datos reales.
+
+**Se añadió diagnóstico en vez de seguir adivinando** (`connectors/dex_grvt.py`,
+mismo patrón que ya funcionó para encontrar el bug de `funding_rate_curr`):
+dos `logger.warning(...)` que en el próximo despliegue van a escribir en los
+logs de Streamlit Cloud ("Manage app" → Logs):
+
+  1. Una muestra cruda (JSON tal cual, sin filtrar por nombre de campo) de
+     hasta 6 filas de `all_instruments` — para ver si `base_decimals`/
+     `quote_decimals` existen de verdad, y con qué nombre, en la respuesta
+     real.
+  2. Para hasta 6 instrumentos cuyo OI/volumen calculado sigue saliendo por
+     debajo de $1 (o que no encontraron `base_decimals`/`quote_decimals`),
+     los valores CRUDOS de `mark_price`, `open_interest`,
+     `buy_volume_24h_q`/`sell_volume_24h_q` antes de aplicar ninguna
+     escala — para poder hacer la cuenta a mano contra la interfaz oficial
+     de GRVT y averiguar la fórmula real, en vez de seguir basándonos en un
+     texto de documentación que este mismo conector ya demostró no fiable
+     una vez.
+
+Pendiente: que el usuario redespliegue una vez más y pegue las líneas de
+log que contengan "grvt DIAGNÓSTICO" — con eso se podrá confirmar (o
+descartar) la hipótesis de `base_decimals`/`quote_decimals` con datos
+reales, en vez de seguir iterando a ciegas.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

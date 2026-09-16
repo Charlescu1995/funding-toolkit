@@ -964,6 +964,62 @@ ciegas porque, a diferencia de los tres campos de arriba, aquí el riesgo de
 equivocarse en la otra dirección (pasar de "demasiado pequeño" a "un millón
 de veces demasiado grande") es peor que dejarlo pendiente un despliegue más.
 
+**Confirmado por el usuario en producción**: "La parte de GRVT parece
+arreglada" — el fix de arriba (quitar toda la división de mark_price/OI/
+volumen) queda confirmado con datos reales, no solo con el test.
+
+**Nuevo hallazgo, el mismo mensaje del usuario — Price Spread alto en pares
+que NO tocan GRVT.** "Pero aun hay más activos con un 100% de Price spread"
+— capturas de producción muestran Price Spread de entre ~1% y ~240% en
+pares como CAT (bitget/mexc), RTX (gate/aster), HK50 (mexc/gate), PURR
+(extended/hyperliquid), SIREN (extended/mexc), CAKE (kucoinfutures/extended),
+BERA (hyperliquid/extended), APEX (lighter/extended), NEIRO (aster/apex) —
+casi ninguno con GRVT de por medio, así que no es una repetición del mismo
+bug que se acaba de arreglar.
+
+Dos hipótesis sobre la mesa, ninguna todavía confirmada con datos reales:
+
+  1. **Divergencia de precio genuina.** El propio docstring de
+     `price_spread()` (`core/scoring.py`) ya avisa de que esto "puede
+     dispararse en símbolos poco líquidos... donde cada exchange puede
+     llevar su propio índice de precio" — sería la métrica haciendo
+     exactamente lo que se diseñó para hacer.
+  2. **Choque de símbolos.** El "Símbolo" que se ve en la tabla de Ranking
+     es un ticker corto ya normalizado (`core/normalize.py`, y en el caso de
+     los CEX vía ccxt, `base = entry["symbol"].split("/")[0]` en
+     `connectors/cex_ccxt.py`) — si dos exchanges usan un nombre de contrato
+     distinto para lo que en realidad es el mismo activo (ej. un exchange
+     antepone "1000" al ticker de un memecoin de precio muy bajo y el otro
+     no), o si directamente dos activos DISTINTOS comparten por casualidad
+     el mismo ticker corto (más probable en tickers de 3-4 letras como
+     "CAT"/"RTX"/"HK50"), `compute_opportunities()` los empareja como si
+     fueran el mismo mercado y el "Price Spread" que sale no es un coste de
+     entrada real — es comparar dos cosas distintas.
+
+No se ha tocado código de cálculo todavía porque, igual que con los tres
+intentos fallidos del bug de GRVT, adivinar la causa sin verla en datos
+reales ya ha salido mal dos veces en este mismo proyecto. En vez de eso se
+añadió una herramienta de diagnóstico permanente, no un log de usar y tirar:
+un nuevo expander en `pages/1_Funding_Rates.py`, "Diagnóstico: Price Spread
+más alto", que enseña — para las 20 oportunidades con el Price Spread más
+alto — el **símbolo real (`raw_symbol`) y el `mark_price`** de cada pierna,
+no solo el ticker corto normalizado de la tabla de Ranking. Con eso se puede
+ver a ojo, sin adivinar:
+
+  - Si `long_raw_symbol`/`short_raw_symbol` resultan ser el mismo contrato
+    con nombres distintos (ej. `"CATUSDT"` vs `"1000CATUSDT"`) → es un
+    choque de símbolos al normalizar (hipótesis 2), y el fix sería en
+    `core/normalize.py`/los conectores CEX, no en `price_spread()`.
+  - Si de verdad es el mismo contrato en ambos exchanges y aun así el
+    `mark_price` difiere tanto → es divergencia real (hipótesis 1), y no
+    hace falta ningún fix — la interfaz está avisando de un riesgo real de
+    entrada, tal como se diseñó.
+
+Pendiente: que el usuario redespliegue, abra ese expander para los símbolos
+que vio con Price Spread alto y pegue lo que salga (es JSON, se puede copiar
+directo) — con eso se decide entre las dos hipótesis con datos reales antes
+de tocar ningún cálculo.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

@@ -389,3 +389,47 @@ if oi_errors:
             "en vez de mostrar profundidad — no es que falte el dato, es lo que respondió (o no) el exchange."
         )
         st.json({f"{ex} · {sym}": msg for (ex, sym), msg in oi_errors.items()})
+
+# Diagnóstico Price Spread alto (reportado en producción, 2026-09-16): tras
+# arreglar el bug de GRVT, siguen apareciendo Price Spread de decenas/cientos
+# de % en pares que NO tocan GRVT (ej. CAT bitget/mexc, RTX gate/aster, HK50
+# mexc/gate...). El "Símbolo" de la tabla de Ranking es el ticker corto ya
+# normalizado (core/normalize.py / cex_ccxt.py: `base = ...symbol.split("/")[0]`)
+# — a propósito no se enseña ahí el símbolo real de cada exchange, así que no
+# hay forma de distinguir desde la tabla si es (a) divergencia real de precio
+# entre exchanges poco líquidos (justo lo que esta métrica está pensada para
+# avisar, ver docstring de core/scoring.py) o (b) un choque de símbolos: dos
+# activos DISTINTOS que casualmente normalizan al mismo ticker corto (p.ej. un
+# contrato con prefijo "1000X" en un exchange frente al mismo ticker sin ese
+# prefijo en otro, o un ticker de 3-4 letras que por casualidad coincide entre
+# un memecoin y otra cosa). En vez de adivinar cuál de las dos es, se enseña
+# aquí el símbolo real (raw_symbol) y el mark_price de cada pierna para las
+# oportunidades con el Price Spread más alto — con eso sí se puede saber a
+# ciencia cierta cuál de las dos hipótesis es la correcta, sin inventar nada.
+high_price_spread = sorted(
+    (o for o in opportunities if o.price_spread_pct is not None),
+    key=lambda o: o.price_spread_pct,
+    reverse=True,
+)[:20]
+if high_price_spread:
+    with st.expander(
+        f"Diagnóstico: Price Spread más alto (top {len(high_price_spread)}) — símbolo real y precio de cada pierna"
+    ):
+        st.caption(
+            "Compara long_raw_symbol/short_raw_symbol: si son el mismo activo con nombres distintos "
+            "(ej. 'CATUSDT' vs '1000CATUSDT') es un choque de símbolos al normalizar, no una "
+            "divergencia de precio real. Si de verdad son el mismo contrato en ambos exchanges y "
+            "aun así el mark_price difiere tanto, es divergencia real (probablemente por baja "
+            "liquidez, ver docstring de core/scoring.py)."
+        )
+        st.json(
+            [
+                {
+                    "símbolo (normalizado)": o.symbol,
+                    "long": f"{o.long_exchange} · raw={o.long_raw_symbol} · mark_price={o.long_mark_price}",
+                    "short": f"{o.short_exchange} · raw={o.short_raw_symbol} · mark_price={o.short_mark_price}",
+                    "price_spread_pct": f"{o.price_spread_pct:.2f}%",
+                }
+                for o in high_price_spread
+            ]
+        )

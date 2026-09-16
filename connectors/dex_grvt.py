@@ -28,38 +28,10 @@ Docs: https://api-docs.grvt.io/market_data_api/
       sesión se salta la autenticación por completo cuando no se le pasa
       una api_key, y solo hace falta para los endpoints de trading)
 
-Puntos SIN verificar contra la red real (este entorno de desarrollo no tiene
-salida a internet hacia exchanges) — de los conectores DEX que hemos hecho,
-este es el que más asunciones acumula, así que es el primero a revisar en
-cuanto lo tengas desplegado, igual que hicimos con Lighter:
-
-  - **Escala de precios**: mark_price/index_price vienen como enteros en
-    formato texto (ej. "59373870996065" para ~59,373.87 USD), lo que sugiere
-    un punto fijo de 9 decimales (÷ 1e9). Se asume ese factor para TODOS los
-    instrumentos por igual — el propio esquema de GRVT tiene un campo
-    `base_decimals`/`quote_decimals` por instrumento que podría implicar que
-    la escala varíe caso a caso; no se ha podido confirmar.
-  - **Unidad del funding rate**: el campo `funding_rate_curr` del ticker se
-    documenta como expresado en "centibeeps". Se asume 1 centibeep = 1e-6 en
-    fracción decimal (100 centibeeps = 0.01% = 0.0001), pero esta conversión
-    no viene de un ejemplo numérico oficial confirmado, es una deducción del
-    propio nombre de la unidad — es EL PRIMER NÚMERO a comparar contra la
-    interfaz oficial de GRVT en cuanto haya datos en vivo.
-  - **Intervalo de liquidación**: no se encontró un campo fiable de "horas
-    de intervalo" ni en el listado de instrumentos ni en el ticker (el tipo
-    `Instrument` del SDK oficial no lo incluye, solo distingue PERPETUAL vs
-    instrumentos con vencimiento). Se intenta leer un campo así por si la
-    API real lo trae con otro nombre, y si no aparece se usa 8h por defecto
-    (el más común en el sector) — candidato número dos a revisar en vivo.
-  - **Unidad del open interest**: la documentación pública dice que viene
-    "en unidades decimales del activo base" — pero probado con un valor de
-    ejemplo real (8174350000000, del propio SDK oficial) sin escalar, el USD
-    resultante da cifras de cientos de billones de dólares, imposible para
-    un exchange de este tamaño. Como el resto de campos numéricos de GRVT
-    (precios incluidos) van en punto fijo de 9 decimales, se asume que
-    open_interest usa la MISMA escala (÷ 1e9) antes de multiplicar por el
-    mark price — coherente mejor que sin escalar, pero sigue sin confirmarse
-    contra la red real. Tercer y último candidato a revisar en vivo.
+Historia de las asunciones de escala que se fueron probando (mantenida por
+contexto — el bloque **"ESTADO ACTUAL CONFIRMADO"** al final del docstring
+es la versión vigente, con datos en vivo reales, y anula todo lo de abajo
+que la contradiga):
 
 Primer despliegue real de este conector (con el fail-loud ya puesto): dio
 "grvt: 0/194 instrumentos fallaron y no quedó ningún par válido — muestra de
@@ -200,19 +172,99 @@ Si algún instrumento no trae `base_decimals`/`quote_decimals` en
 se deja el OI/Volumen de ESE instrumento en `None` en vez de asumir un
 divisor — mismo criterio de "no inventar" que el resto del proyecto.
 
-**Sobre el Price Spread disparatado en sí**: el mark_price NO estaba mal
-(su escala ÷1e9 es uniforme y está confirmada arriba), así que la
-corrección de OI/Volumen no lo toca. Como este mismo conector ya demostró
-una vez que la documentación de GRVT puede no coincidir con la realidad en
-vivo (ver el ejemplo numérico de `mark_price` de la propia página de docs,
-que contradice el formato real confirmado en producción), no se da por
-sentado que el precio esté libre de problemas solo porque el texto de la
-documentación lo diga — como red de seguridad adicional, `price_spread()`
-en `core/scoring.py` ahora descarta (devuelve `None`, se ve como "—" en la
-interfaz) cualquier spread por encima de un umbral que ya es imposible para
-dos precios reales del mismo activo, en vez de mostrar un porcentaje que no
-nos creemos ni nosotros. Ver el docstring de esa función para el umbral
-exacto y el razonamiento.
+**Sobre el Price Spread disparatado en sí**: en esa ronda se asumió que el
+mark_price no estaba mal (porque la documentación decía que su escala ÷1e9
+era uniforme) — ver más abajo por qué esa asunción también era falsa. Se
+dejó de todos modos, como red de seguridad permanente (no solo mientras
+esto se depuraba), una guardia de cordura en `price_spread()`
+(`core/scoring.py`): por encima de un umbral ya imposible entre dos precios
+reales del mismo activo, el resultado se descarta a `None` en vez de
+enseñar un número que no nos creemos.
+
+--- BUG REAL, tercera vuelta: la corrección de arriba (base_decimals/
+    quote_decimals) tampoco resolvió nada en producción — CONFIRMADO con
+    datos EN VIVO, no con documentación ---
+
+El usuario desplegó el fix de `base_decimals`/`quote_decimals`, reinició la
+app dos veces, y los mismos síntomas seguían idénticos. Eso descartó "está
+desplegando código viejo" y dejó una sola explicación: la propia
+documentación de GRVT (la fuente de la que salió TODA la lógica de escala
+de este módulo, arriba) no coincide con lo que la API responde de verdad.
+Ya nos había pasado una vez con el nombre del campo de funding rate — esta
+vez pasaba con la escala numérica de varios campos a la vez.
+
+Para no seguir adivinando, se añadió diagnóstico (`logger.warning` con el
+JSON crudo de `all_instruments` y de los tickers que salían sospechosamente
+cerca de cero) y se le pidió al usuario que redesplegara una vez más y
+pegara el log. Los datos reales (2026-09-16, instrumentos como AAOI, AAVE,
+AMAT, ARB, AMZN, AAPL — acciones tokenizadas y cripto reales de GRVT) fueron
+inequívocos:
+
+    "mark_price": "95.586640085"          (AAOI — acción real ~$95)
+    "mark_price": "331.868861219"         (AAPL — acción real ~$332)
+    "mark_price": "0.150444379"           (ARB — cripto real ~$0.15)
+    "open_interest": "3218.0"             (AAVE — cantidad de tokens, no un entero gigante)
+    "open_interest": "2287449.6"          (ARB — cantidad de tokens, plausible para un token barato)
+    "buy_volume_24h_q": "51208.1677"      (AAOI — ya en USD, un volumen de 24h creíble)
+
+Ningún campo trae un entero de punto fijo — TODOS vienen como el número
+decimal humano directo, ya en su unidad final (USD para precios y volumen,
+unidades del activo base para open_interest). Cruzando 7 instrumentos
+reales de una sola vez (acciones y cripto, precios que van de $0.15 a
+$422), cada uno da un valor PLAUSIBLE sin dividir por nada — la prueba más
+fuerte que se puede pedir sin abrir la interfaz de GRVT a mano. La
+documentación oficial ("expressed in `9` decimals") no significaba "punto
+fijo, divide por mil millones" como se asumió en las dos rondas anteriores
+— significaba "hasta 9 decimales de precisión en el propio número", y el
+ejemplo cacheado del SDK oficial que sí parecía un entero de punto fijo
+("59373870996065") era, con esta luz, o bien de una versión distinta de la
+API, o bien nunca representó lo que se asumió. Sea como sea, el criterio de
+este proyecto es la evidencia en vivo más reciente por encima de cualquier
+documentación o ejemplo de SDK, y esta es inequívoca.
+
+**Corrección aplicada (reemplaza TODO lo de las dos rondas anteriores)**:
+ninguno de estos tres campos se escala — se usan tal cual, convertidos a
+`float`:
+
+    mark_price       = float(mark_price_raw)
+    oi_usd           = float(open_interest_raw) * mark_price
+    volume_24h_usd   = float(buy_volume_24h_q_raw) + float(sell_volume_24h_q_raw)
+
+`base_decimals`/`quote_decimals` y `PRICE_SCALE` ya NO se usan para nada de
+esto (se deja `PRICE_SCALE` como constante sin uso por si algún día aparece
+un campo que sí lo necesite, para no perder el nombre). El diagnóstico
+(`logger.warning`) SE MANTIENE activo — más vale un log de más que otra
+ronda a ciegas si algo vuelve a no cuadrar.
+
+**Funding rate — sospecha SIN confirmar todavía, no tocado en esta ronda**:
+en las capturas del usuario, la pierna de GRVT muestra sistemáticamente
+"+0.0%"/"-0.1%"/"-0.2%" de APR, mientras que las otras piernas del mismo
+par muestran cifras normales — el mismo patrón de "algo se está escalando
+de más" que ya vimos con precio/OI/volumen, esta vez aplicado a
+`funding_rate_8h_curr` × `CENTIBEEPS_TO_DECIMAL` (÷1e6). Es muy probable que
+este campo tenga el mismo problema (GRVT devolviendo ya el número humano en
+vez de una unidad "centibeeps" que haya que convertir), pero a diferencia de
+precio/OI/volumen NO hay todavía un valor crudo confirmado en un log real
+para probarlo — cambiarlo a ciegas, y encima en la dirección contraria (de
+"demasiado pequeño" a potencialmente "un millón de veces más grande" si la
+asunción nueva también fuera errónea), es más arriesgado que dejarlo
+pendiente. Se añadió el valor crudo de `funding_rate_8h_curr` al diagnóstico
+de abajo para confirmarlo con datos reales antes de tocar la fórmula.
+
+--- ESTADO ACTUAL CONFIRMADO (2026-09-16) ---
+
+  - `mark_price` / `index_price`: número decimal humano directo, SIN
+    escalar. Confirmado con 7 instrumentos reales en producción.
+  - `open_interest`: número decimal humano directo (cantidad del activo
+    base), SIN escalar — se multiplica por `mark_price` para obtener USD.
+    Confirmado igual que arriba.
+  - `buy_volume_24h_q` / `sell_volume_24h_q`: número decimal humano directo
+    en USD, SIN escalar — se suman ambos. Confirmado igual que arriba.
+  - `funding_rate_8h_curr` (÷1e6 "centibeeps"): SOSPECHOSO de tener el mismo
+    problema, pero NO confirmado con un valor crudo real todavía — ver nota
+    de arriba. Diagnóstico añadido, pendiente de un despliegue más.
+  - Intervalo de liquidación (8h) y el nombre del campo de funding rate:
+    siguen confirmados de rondas anteriores, sin cambios.
 """
 
 from __future__ import annotations
@@ -406,69 +458,58 @@ class GrvtConnector:
                         unparsed_samples[name] = {"claves_presentes": list(ticker.keys())}
                     continue
 
+                # Ver "ESTADO ACTUAL CONFIRMADO" en el docstring del módulo:
+                # confirmado con datos EN VIVO (2026-09-16, 7 instrumentos
+                # reales) que mark_price/open_interest/buy_volume_24h_q/
+                # sell_volume_24h_q vienen YA como el número humano directo —
+                # NADA de esto se escala. PRICE_SCALE/base_decimals/
+                # quote_decimals dejaron de usarse aquí (dos rondas anteriores
+                # de este mismo bug estaban aplicando un divisor que no hacía
+                # falta).
                 mark_price_raw = ticker.get("mark_price")
-                mark_price = (
-                    float(mark_price_raw) / PRICE_SCALE if mark_price_raw is not None else None
-                )
+                mark_price = float(mark_price_raw) if mark_price_raw is not None else None
 
-                # Ver nota "BUG REAL" en el docstring del módulo: open_interest
-                # NO usa la escala de precio (PRICE_SCALE) — usa base_decimals,
-                # por instrumento, tal cual lo confirma la documentación oficial
-                # ("expressed in base asset decimal units"). Si este instrumento
-                # concreto no trajo base_decimals en all_instruments, se deja
-                # el OI en None en vez de adivinar un divisor.
                 oi_raw = ticker.get("open_interest")
-                base_decimals = base_decimals_by_instrument.get(name)
                 oi_usd = None
-                if oi_raw is not None and mark_price is not None and base_decimals is not None:
+                if oi_raw is not None and mark_price is not None:
                     try:
-                        oi_base_units = float(oi_raw) / (10 ** base_decimals)
-                        oi_usd = oi_base_units * mark_price
+                        oi_usd = float(oi_raw) * mark_price
                     except (TypeError, ValueError):
                         oi_usd = None
 
-                # Mismo caso que open_interest, pero con quote_decimals (la
-                # documentación oficial dice "expressed in quote asset decimal
-                # units" para buy_volume_24h_q/sell_volume_24h_q — ver nota
-                # "BUG REAL" en el docstring del módulo).
                 buy_q_raw = ticker.get("buy_volume_24h_q")
                 sell_q_raw = ticker.get("sell_volume_24h_q")
-                quote_decimals = quote_decimals_by_instrument.get(name)
                 volume_24h_usd = None
-                if buy_q_raw is not None and sell_q_raw is not None and quote_decimals is not None:
+                if buy_q_raw is not None and sell_q_raw is not None:
                     try:
-                        volume_24h_usd = (float(buy_q_raw) + float(sell_q_raw)) / (10 ** quote_decimals)
+                        volume_24h_usd = float(buy_q_raw) + float(sell_q_raw)
                     except (TypeError, ValueError):
                         volume_24h_usd = None
 
                 base = name.split("_")[0] if "_" in name else name
                 interval_hours = interval_by_instrument.get(name, FALLBACK_INTERVAL_HOURS)
 
-                # Diagnóstico (ver el warning consolidado tras el bucle, y el
-                # docstring del módulo): si el OI/volumen calculado sigue
-                # saliendo sospechosamente cercano a cero, o si no había
-                # base_decimals/quote_decimals para este instrumento, guardamos
-                # los valores crudos (antes de escalar) para poder comparar a
-                # mano contra la interfaz oficial de GRVT — sin esto, seguimos
-                # a ciegas sobre si el campo se llama distinto en producción o
-                # si la fórmula en sí está mal.
-                looks_broken = (
-                    (oi_usd is not None and 0 < oi_usd < 1.0)
-                    or (volume_24h_usd is not None and 0 < volume_24h_usd < 1.0)
-                    or base_decimals is None
-                    or quote_decimals is None
-                )
-                if looks_broken and len(ticker_diagnostic_samples) < 6:
+                # Diagnóstico (ver el warning consolidado tras el bucle, y la
+                # nota "Funding rate — sospecha sin confirmar" en el docstring
+                # del módulo): se sigue guardando una muestra acotada, ahora
+                # también con el valor crudo/calculado del funding rate, para
+                # poder confirmar (o descartar) con un log real si ese campo
+                # tiene el mismo problema de escala que ya tuvieron precio/OI/
+                # volumen en las dos rondas anteriores — y, de paso, para
+                # verificar con el próximo despliegue que este fix sí dio
+                # números con sentido (no cerca de cero, no absurdamente
+                # grandes) en vez de asumirlo a ciegas otra vez.
+                if len(ticker_diagnostic_samples) < 6:
                     ticker_diagnostic_samples[name] = {
                         "mark_price_raw": mark_price_raw,
                         "mark_price_calculado": mark_price,
                         "open_interest_raw": oi_raw,
-                        "base_decimals_encontrado": base_decimals,
                         "oi_usd_calculado": oi_usd,
                         "buy_volume_24h_q_raw": buy_q_raw,
                         "sell_volume_24h_q_raw": sell_q_raw,
-                        "quote_decimals_encontrado": quote_decimals,
                         "volume_24h_usd_calculado": volume_24h_usd,
+                        "funding_rate_raw": rate_raw,
+                        "funding_rate_calculado": float(rate_raw) * CENTIBEEPS_TO_DECIMAL,
                     }
 
                 out.append(
@@ -488,9 +529,9 @@ class GrvtConnector:
 
         if ticker_diagnostic_samples:
             logger.warning(
-                "grvt DIAGNÓSTICO ticker (%d instrumentos con OI/volumen sospechosamente "
-                "cercano a cero o sin base_decimals/quote_decimals — valores crudos ANTES "
-                "de escalar, para comparar a mano contra la interfaz oficial de GRVT): %s",
+                "grvt DIAGNÓSTICO ticker (%d instrumentos, muestra tras el fix de escala de "
+                "precio/OI/volumen — valores crudos Y calculados, incluido funding_rate_8h_curr "
+                "crudo/calculado, para confirmar si ESE campo necesita el mismo tipo de arreglo): %s",
                 len(ticker_diagnostic_samples),
                 json.dumps(ticker_diagnostic_samples, default=str)[:4000],
             )

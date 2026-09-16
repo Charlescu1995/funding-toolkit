@@ -921,6 +921,49 @@ log que contengan "grvt DIAGNÓSTICO" — con eso se podrá confirmar (o
 descartar) la hipótesis de `base_decimals`/`quote_decimals` con datos
 reales, en vez de seguir iterando a ciegas.
 
+**Actualización final — CONFIRMADO con el log real, y era otra cosa
+completamente distinta.** El usuario pegó el log de producción pedido
+arriba. Los datos en vivo (7 instrumentos reales de GRVT: AAOI, AAVE, AMAT,
+ARB, AMZN, AAPL, ADA) fueron inequívocos y consistentes entre sí:
+`mark_price`, `open_interest`, `buy_volume_24h_q` y `sell_volume_24h_q` NO
+vienen como enteros de punto fijo — vienen como el número decimal humano
+DIRECTO, ya en su unidad final. Ejemplos reales del log:
+`"mark_price": "95.586640085"` para AAOI (una acción que de verdad cotiza
+sobre los $95), `"mark_price": "0.150444379"` para ARB (~$0.15, el precio
+real de ARB), `"open_interest": "2287449.6"` para ARB (una cantidad de
+tokens perfectamente plausible, no un entero gigante). Ninguna de las dos
+rondas anteriores de este bug (÷1e9 primero, `base_decimals`/
+`quote_decimals` después) tenía razón — ambas dividían un número que ya
+estaba bien, encima de más, hasta dejarlo cerca de cero.
+
+**Corrección final**: se quitó TODA la división para estos tres campos —
+`mark_price = float(mark_price_raw)`, `oi_usd = float(open_interest_raw) *
+mark_price`, `volume_24h_usd = float(buy_volume_24h_q) +
+float(sell_volume_24h_q)`. `PRICE_SCALE`/`base_decimals`/`quote_decimals`
+ya no se usan para nada de esto (se documenta toda la historia en el
+docstring de `connectors/dex_grvt.py`, sección "BUG REAL, tercera vuelta").
+Verificado con un test que usa los valores EXACTOS del log real (AAOI, ARB)
+en vez de datos inventados — con cualquiera de los dos fixes anteriores,
+esos mismos números habrían seguido dando OI/volumen cercanos a cero.
+
+**Efecto colateral positivo, sin tocar código**: al arreglar el precio, el
+Price Spread de GRVT también debería volver a valores sensatos — ya no
+dependía de OI, pero si algo aguas abajo llegaba a depender de un
+mark_price mal escalado en otra ronda de este mismo bug, esto también lo
+arregla. La guardia de cordura (`IMPLAUSIBLE_SPREAD_PCT`) se mantiene como
+red de seguridad permanente, no solo para este caso.
+
+**Pendiente, NO tocado en esta ronda**: la pierna de GRVT sigue mostrando
+sistemáticamente APR ~0.0% en las capturas del usuario (`funding_rate_8h_curr`
+× `CENTIBEEPS_TO_DECIMAL`, ÷1e6) — el mismo patrón de "posible sobre-escalado"
+que ya vimos tres veces con otros campos, pero esta vez sin un valor crudo
+todavía confirmado en un log real para probarlo. Se añadió el valor crudo de
+`funding_rate_8h_curr` (y el calculado) al mismo diagnóstico, así que el
+próximo log ya lo va a traer sin pedir nada nuevo. No se cambió la fórmula a
+ciegas porque, a diferencia de los tres campos de arriba, aquí el riesgo de
+equivocarse en la otra dirección (pasar de "demasiado pequeño" a "un millón
+de veces demasiado grande") es peor que dejarlo pendiente un despliegue más.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

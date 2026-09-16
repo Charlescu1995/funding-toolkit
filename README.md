@@ -803,6 +803,32 @@ que el resto de datos de este proyecto: los campos marcados arriba como
 RiseX, Paradex, ApeX) son los primeros a revisar si algún volumen sale con
 una magnitud claramente disparatada en producción.
 
+**[BUG REAL encontrado en producción, corregido]** Al confirmar Volumen 24h
+en el primer despliegue, el propio volumen quedó bien (columnas pobladas con
+datos reales — ver ejemplo 1000000MOG: apex con $7.6M de volumen, un número
+claramente distinto de su OI, así que no era una copia accidental del OI).
+El bug estaba en cómo se pintaban las columnas: "OI long/short", "Cuello de
+botella OI/Vol" y "Vol 24h long/short" se pre-formateaban como texto
+(`_fmt_usd()`, ej. `"$9.4M"`) antes de meterlas en el `DataFrame`, por una
+suposición de que pasarlas como número crudo a `column_config.NumberColumn`
+enseñaría el texto literal `"None"` para los valores nulos. Al pulsar la
+cabecera de una de esas columnas para ordenar, Streamlit las ordenaba como
+TEXTO (alfabéticamente), no como número — así `"$9.4M"` salía antes que
+`"$898,647"` porque `'9'` es mayor que `'8'` comparando caracter a caracter,
+aunque 898.647 < 9.400.000 numéricamente. Confirmado con un test directo de
+pandas/pyarrow que la suposición original era incorrecta: una columna con
+mezcla de `float` y `None` se convierte a `float64` con `NaN`, no a texto, y
+`column_config.NumberColumn` ya pinta esos `NaN` en blanco sin necesidad de
+pre-formatear nada. **Arreglado**: las seis columnas pasan ahora el valor
+crudo (`float | None`) con `column_config.NumberColumn(format="compact")`
+(ordenan bien y se siguen viendo como `$1.2M` gracias al formato nativo de
+Streamlit), y el "lado" del cuello de botella (antes un sufijo de texto
+`" (long)"` pegado al número, lo que ya de por sí impedía tratarlo como
+número) se separó en dos columnas propias, "Lado OI" y "Lado Vol" — así cada
+columna es o 100% numérica o 100% texto, nunca una mezcla que rompa el
+ordenado. `_fmt_usd()` se mantiene solo para los paneles de diagnóstico
+(`st.json`), que no son tablas ordenables.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

@@ -52,28 +52,25 @@ def _apr_cell_color(value: float, vmin: float = -50, vmax: float = 50) -> str:
 
 def _fmt_usd(value: float | None) -> str:
     """
-    Formatea OI en USD para mostrar en tabla — con guion para None en vez del
-    "None" literal que enseña st.dataframe cuando el valor real es un NaN/None
-    y se le pasa column_config.NumberColumn. Al pre-formatear como texto
-    nosotros, controlamos el resultado exacto.
+    Formatea un importe en USD para texto libre (los paneles de diagnóstico
+    más abajo, que son st.json/f-strings, no una tabla ordenable) — con
+    guion para None.
+
+    OJO: NO usar esto para columnas de un st.dataframe que el usuario pueda
+    querer ordenar (ver bug real encontrado en producción, comentado junto a
+    la tabla de Ranking más abajo): pre-formatear un número como texto hace
+    que Streamlit lo ordene alfabéticamente en vez de numéricamente cuando se
+    pulsa la cabecera de columna ("$9.4M" antes que "$898,647", por ejemplo).
+    Para esos casos, pasar el valor crudo (float | None) y usar
+    column_config.NumberColumn(format=...) — comprobado con pandas/pyarrow
+    que un None en una columna float se convierte a NaN, no al string
+    "None", así que no hace falta este pre-formateo para evitarlo.
     """
     if value is None:
         return "—"
     if value >= 1_000_000:
         return f"${value / 1_000_000:,.1f}M"
     return f"${value:,.0f}"
-
-
-def _fmt_pct(value: float | None) -> str:
-    """
-    Igual que _fmt_usd pero para porcentajes con signo de "—" cuando falta el
-    dato (p.ej. price_spread_pct sin mark_price en alguna de las dos piernas).
-    Mismo motivo que _fmt_usd: pre-formatear como texto nosotros evita el
-    "None" literal que enseña column_config.NumberColumn con valores nulos.
-    """
-    if value is None:
-        return "—"
-    return f"{value:.2f}%"
 
 
 def render_matrix_html(matrix: dict[str, dict[str, NormalizedRate]], columns: list[str]) -> str:
@@ -257,35 +254,49 @@ with tab_ranking:
                     "Long en": f"{o.long_exchange} ({o.long_apr:+.1f}%)",
                     "Short en": f"{o.short_exchange} ({o.short_apr:+.1f}%)",
                     "Spread APR": o.spread_apr,
-                    "Price Spread": _fmt_pct(o.price_spread_pct),
+                    "Price Spread": o.price_spread_pct,
                     "Consistency (30d)": o.consistency_pct,
-                    "OI long ($)": _fmt_usd(o.oi_long_usd),
-                    "OI short ($)": _fmt_usd(o.oi_short_usd),
-                    "Cuello de botella OI ($)": _fmt_usd(o.oi_bottleneck_usd)
-                    + (f" ({o.oi_bottleneck_side})" if o.oi_bottleneck_side else ""),
-                    "Vol 24h long ($)": _fmt_usd(o.volume_long_usd),
-                    "Vol 24h short ($)": _fmt_usd(o.volume_short_usd),
-                    "Cuello de botella Vol ($)": _fmt_usd(o.volume_bottleneck_usd)
-                    + (f" ({o.volume_bottleneck_side})" if o.volume_bottleneck_side else ""),
+                    "OI long ($)": o.oi_long_usd,
+                    "OI short ($)": o.oi_short_usd,
+                    "Cuello de botella OI ($)": o.oi_bottleneck_usd,
+                    "Lado OI": o.oi_bottleneck_side or "—",
+                    "Vol 24h long ($)": o.volume_long_usd,
+                    "Vol 24h short ($)": o.volume_short_usd,
+                    "Cuello de botella Vol ($)": o.volume_bottleneck_usd,
+                    "Lado Vol": o.volume_bottleneck_side or "—",
                 }
                 for o in opportunities
             ]
         )
 
+        # Todas las columnas numéricas de abajo se pasan como número crudo
+        # (float o None), NUNCA pre-formateadas a texto (a diferencia de una
+        # versión anterior de esta tabla, que usaba _fmt_usd/_fmt_pct para
+        # evitar un supuesto "None" literal de column_config.NumberColumn).
+        # BUG REAL encontrado en producción: pre-formatear como texto rompe
+        # el orden al pulsar la cabecera de columna — Streamlit ordena texto
+        # alfabéticamente, así que "$9.4M" salía antes que "$898,647" (el '9'
+        # gana al '8' comparando caracter a caracter, aunque 898,647 < 9.4M
+        # como número). Comprobado con pandas/pyarrow que un None en una
+        # columna float se convierte a NaN (no a la cadena "None") y
+        # column_config.NumberColumn lo enseña en blanco — el motivo original
+        # para pre-formatear ya no aplicaba, y estaba rompiendo el ordenado.
         st.dataframe(
             df,
             width="stretch",
             hide_index=True,
             column_config={
                 "Spread APR": st.column_config.NumberColumn(format="%.1f%%"),
+                "Price Spread": st.column_config.NumberColumn(format="%.2f%%"),
                 "Consistency (30d)": st.column_config.ProgressColumn(
                     format="%.0f%%", min_value=0, max_value=100
                 ),
-                # OI long/short/Cuello de botella van pre-formateadas como
-                # texto (ver _fmt_usd) a propósito: pasarlas como número con
-                # column_config.NumberColumn enseña el texto literal "None"
-                # para los valores nulos, y no hay forma limpia de evitarlo
-                # desde la config de columna.
+                "OI long ($)": st.column_config.NumberColumn(format="compact"),
+                "OI short ($)": st.column_config.NumberColumn(format="compact"),
+                "Cuello de botella OI ($)": st.column_config.NumberColumn(format="compact"),
+                "Vol 24h long ($)": st.column_config.NumberColumn(format="compact"),
+                "Vol 24h short ($)": st.column_config.NumberColumn(format="compact"),
+                "Cuello de botella Vol ($)": st.column_config.NumberColumn(format="compact"),
             },
         )
         st.caption(
@@ -298,7 +309,9 @@ with tab_ranking:
             "OI (cuánto hay abierto ahora), dice cuánto se ha estado moviendo; un mercado con OI "
             "decente pero volumen bajo probablemente tenga más slippage del que el OI por sí solo "
             "sugiere. No todos los exchanges lo exponen en su fetch masivo, así que puede salir en "
-            "blanco incluso fuera del top. «—» = sin dato disponible."
+            "blanco incluso fuera del top. Lado OI/Lado Vol: qué pierna (long/short) es la más fina "
+            "en cada caso — en columna aparte para que las de cuello de botella sean 100% numéricas y "
+            "se puedan ordenar bien. «—» = sin dato disponible."
         )
 
 with tab_matrix:

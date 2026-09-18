@@ -1166,6 +1166,113 @@ diagnóstico en `pages/1_Funding_Rates.py`. Verificado con un test que usa
 los valores EXACTOS de INTU y NOW_24_5 del log real: INTU se conserva
 (Vol 24h=$0 pero ACTIVE), NOW_24_5 se descarta (DELISTED).
 
+## Investigando (2026-09-18): oportunidades con long y short en el MISMO exchange
+
+El usuario exportó el Ranking completo a CSV (912 filas) para buscar dónde
+poner un límite de liquidez mínima (ver siguiente sección) y, al estudiarlo,
+aparecieron 121 filas donde `Long en` y `Short en` son literalmente el mismo
+exchange — ej. SSV en `okx (+10.9%)` vs `okx (+10.9%)`, CIFR en `gate` vs
+`gate`, MUSTOCK en `mexc` vs `mexc` — y en las 121, el Spread APR sale
+EXACTAMENTE 0.0%, nunca solo "parecido".
+
+**Por qué no puede ser "un token listado solo en un exchange"** (hipótesis
+que se planteó y se descartó con el propio código, sin necesidad de datos en
+vivo): en `compute_opportunities()`,
+
+```python
+for symbol, group in by_symbol.items():
+    if len(group) < 2:
+        continue
+    long_leg = min(group, key=lambda r: r.apr_pct)
+    short_leg = max(group, key=lambda r: r.apr_pct)
+```
+
+si un símbolo solo tiene una fila en `group` (un solo exchange lo trae), el
+`if len(group) < 2` lo descarta ENTERO — no se crea ninguna oportunidad. Así
+que "listado en un solo exchange" no puede producir nunca una fila
+mismo-exchange; produce cero filas para ese símbolo. Para que aparezca la
+pareja mismo-exchange hace falta lo contrario: que ESE exchange, él solo,
+aporte 2+ filas para el mismo símbolo normalizado.
+
+**Candidatos de código (sin confirmar aún en vivo — ver más abajo)**:
+
+  - `connectors/cex_ccxt.py` (okx/bitget/gate...): el filtro de quote es
+    `market_symbol.endswith(":USDT") or "/USDT" in market_symbol` — un
+    contrato con vencimiento tipo `SSV/USDT:USDT-241227` también contiene
+    `"/USDT"` como substring, así que pasaría el filtro igual que el
+    perpetuo `SSV/USDT:USDT`, y `base = ...split("/")[0]` normaliza a los
+    dos como "SSV".
+  - `connectors/cex_mexc.py`: `base_symbol = symbol.split("_")[0]` — si MEXC
+    lista el mismo activo con dos quotes distintos (`MUSTOCK_USDT` y
+    `MUSTOCK_USD`), ambos recortan a "MUSTOCK".
+  - `connectors/cex_kucoin.py`: `symbol = row.get("baseCurrency")`
+    directamente — si dos códigos de contrato de KuCoin comparten
+    `baseCurrency`, colisionan igual.
+
+Que el Spread APR salga exactamente 0.0% en las 121 filas (no solo
+parecido) sugiere que probablemente sea el mismo contrato subyacente
+reportando el mismo funding real por dos vías distintas, no dos contratos
+genuinamente distintos con tasas parecidas por casualidad — pero esto
+**todavía no está confirmado con datos reales**.
+
+**Por qué no se confirmó en vivo desde aquí**: se intentó reproducir
+llamando a `ccxt.okx().fetch_funding_rates()` y `ccxt.gate().fetch_funding_rates()`
+directamente desde el sandbox de desarrollo para ver si de verdad salen 2
+claves para el mismo símbolo base — la política de red de ESTE sandbox
+bloquea esas conexiones con un 403 en el CONNECT (`curl -sS
+http://127.0.0.1:38935/__agentproxy/status`), no es un fallo transitorio.
+
+**Paso dado, solo diagnóstico, SIN cambiar comportamiento todavía**:
+`pages/1_Funding_Rates.py` ahora calcula `same_exchange_pairs = [o for o in
+opportunities if o.long_exchange == o.short_exchange]` justo después de
+`compute_opportunities()`, y lo enseña en un nuevo expander de Diagnóstico
+con el `raw_symbol` real de ambas piernas. `compute_opportunities()` en sí
+NO se ha tocado — no se descarta nada todavía. El siguiente despliegue, con
+datos reales de producción, dirá si el mecanismo es alguno de los
+candidatos de arriba (o algo distinto), y con eso sí se puede decidir el fix
+real (lo más probable: agrupar primero por (exchange, symbol) y quedarse
+con una sola fila por exchange antes de emparejar entre exchanges).
+
+## Investigando (2026-09-18): dónde poner un piso de liquidez mínima
+
+Al mismo tiempo que lo de arriba, el usuario planteó que las oportunidades
+con Open Interest o Volumen 24h casi-cero (pero no exactamente $0, que ya
+descarta `has_dead_liquidity`) son "una trampa" — aparecen en el ranking con
+un Spread APR llamativo pero son, en la práctica, imposibles de operar en
+ningún tamaño real. Ejemplo real visto por el usuario: MNT en grvt(long) vs
+hyperliquid(short), Spread APR 60.7%, pero Cuello de botella OI = $261 y
+Cuello de botella Vol = $347 — el propio funding de GRVT para ese mercado
+sale +0.0% (ver sección de GRVT/funding más abajo/arriba), consistente con
+un mercado con casi ninguna actividad real: sin presión de compra/venta que
+separe el precio del índice, no hay premium que calcular, así que el
+funding sale plano.
+
+Del CSV completo (912 filas, 177 con Cuello de botella OI y 170 con Cuello
+de botella Vol), la distribución es continua, sin un salto/hueco natural
+evidente — percentiles de Cuello de botella OI: p5=$1.345, p10=$4.740,
+p20=$10.284, p25=$23.591, p50=$124.803. De Cuello de botella Vol: p5=$288,
+p10=$1.958, p20=$12.152, p25=$18.090, p50=$92.978. El caso más limpio y sin
+ambigüedad es Volumen EXACTAMENTE $0 (5 filas: PYTH, PEOPLE, KLUNC, KFLOKI,
+US500) — sería el mismo patrón que `has_dead_liquidity()` pero aplicado a
+`volume_bottleneck_usd` en vez de a OI. Pendiente de decidir con el usuario
+un piso concreto para el resto (propuesta inicial sobre la mesa: $1.000 en
+OI y/o Volumen del cuello de botella) — no se ha tocado código para esto
+todavía, se está investigando en orden empezando por el bug de arriba.
+
+De paso, estudiando el mismo CSV aparecieron dos hallazgos más sin
+investigar todavía:
+
+  - **SOL en kucoinfutures muestra OI long = −$616.481.571** (negativo) —
+    imposible físicamente, hay un bug de signo o unidades en ese conector
+    para ese símbolo concreto.
+  - **Las 47 filas donde participa GRVT muestran las 47 exactamente
+    "+0.0%" de funding**, incluyendo activos muy líquidos (LINK, ADA, AVAX,
+    UNI, AAVE, ARB, JUP, con Cuello de botella OI de cientos de miles de
+    dólares) — refuerza la sospecha ya documentada más abajo sobre
+    `funding_rate_8h_curr` × `CENTIBEEPS_TO_DECIMAL` en
+    `connectors/dex_grvt.py`, pero sigue sin confirmarse con un valor crudo
+    real de un símbolo líquido.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

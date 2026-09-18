@@ -205,6 +205,7 @@ st.divider()
 oi_errors: dict[tuple[str, str], str] = {}  # se rellena en la pestaña Ranking, se enseña en Diagnóstico
 dead_liquidity: list = []  # idem — oportunidades descartadas por OI $0 confirmado (ver has_dead_liquidity)
 implausible_pairs: list = []  # idem — descartadas por Price Spread implausible (ver has_implausible_price_pair)
+same_exchange_pairs: list = []  # idem — long y short en el MISMO exchange (investigando, ver README 2026-09-18)
 tab_ranking, tab_matrix, tab_history = st.tabs(["🏆 Ranking", "🔲 Matriz", "📈 Histórico"])
 
 with tab_ranking:
@@ -219,6 +220,26 @@ with tab_ranking:
     if not opportunities:
         st.info("Ningún símbolo está presente en 2+ exchanges con los filtros actuales — no hay spread que calcular.")
     else:
+        # Investigando (2026-09-18): el usuario detectó, en un export CSV del
+        # Ranking, 121 filas donde long_exchange == short_exchange con Spread
+        # APR exactamente 0.0% (ej. SSV en okx vs okx, CIFR en gate vs gate,
+        # MUSTOCK en mexc vs mexc). compute_opportunities() nunca comprueba
+        # que las dos piernas de una oportunidad vengan de exchanges
+        # distintos — solo agrupa por símbolo normalizado y coge el
+        # mínimo/máximo APR del grupo. Si un símbolo está listado en solo UN
+        # exchange, `len(group) < 2` lo descarta entero (no puede producir
+        # esto) — así que para que pase hace falta lo contrario: que ESE
+        # exchange, él solo, aporte 2+ filas para el mismo símbolo
+        # normalizado (candidatos de código, sin confirmar aún en vivo por
+        # bloqueo de red del sandbox de desarrollo: un perpetuo + un futuro
+        # con vencimiento pasando el mismo filtro de quote en cex_ccxt.py, o
+        # dos variantes de quote/contrato colapsando al mismo símbolo en
+        # MEXC/KuCoin — ver sus conectores). Solo diagnóstico por ahora, NO
+        # se descarta nada todavía: hace falta ver el raw_symbol real de
+        # ambas piernas en producción para confirmar el mecanismo exacto
+        # antes de decidir el fix.
+        same_exchange_pairs = [o for o in opportunities if o.long_exchange == o.short_exchange]
+
         # Ver core/opportunities.py::has_implausible_price_pair — bug real
         # encontrado en producción (2026-09-16, confirmado con raw_symbol/
         # mark_price reales: "CAT" = Caterpillar Inc. en bitget a $785.85
@@ -400,6 +421,33 @@ if dead_liquidity:
                     "spread_apr_descartado": f"{o.spread_apr:.1f}%",
                 }
                 for o in dead_liquidity
+            ]
+        )
+
+if same_exchange_pairs:
+    with st.expander(
+        f"Diagnóstico: {len(same_exchange_pairs)} oportunidad(es) con long y short en el MISMO exchange"
+    ):
+        st.caption(
+            "compute_opportunities() no comprueba que las dos piernas vengan de exchanges "
+            "distintos — esto pasa cuando un solo exchange aporta 2+ filas para el mismo símbolo "
+            "normalizado (ver comentario justo encima de esta variable en este archivo, y "
+            "core/opportunities.py). Compara long_raw_symbol/short_raw_symbol: si son dos "
+            "contratos reales distintos del mismo exchange (ej. un perpetuo y uno con "
+            "vencimiento, o dos variantes de quote/margen), eso confirma el mecanismo — si son "
+            "IDÉNTICOS, sería otra cosa (duplicado literal en la respuesta del exchange/conector)."
+        )
+        st.json(
+            [
+                {
+                    "símbolo (normalizado)": o.symbol,
+                    "exchange": o.long_exchange,
+                    "long_raw_symbol": o.long_raw_symbol,
+                    "short_raw_symbol": o.short_raw_symbol,
+                    "long_apr": f"{o.long_apr:.4f}%",
+                    "short_apr": f"{o.short_apr:.4f}%",
+                }
+                for o in same_exchange_pairs
             ]
         )
 

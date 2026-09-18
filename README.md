@@ -1226,12 +1226,52 @@ http://127.0.0.1:38935/__agentproxy/status`), no es un fallo transitorio.
 `pages/1_Funding_Rates.py` ahora calcula `same_exchange_pairs = [o for o in
 opportunities if o.long_exchange == o.short_exchange]` justo después de
 `compute_opportunities()`, y lo enseña en un nuevo expander de Diagnóstico
-con el `raw_symbol` real de ambas piernas. `compute_opportunities()` en sí
-NO se ha tocado — no se descarta nada todavía. El siguiente despliegue, con
-datos reales de producción, dirá si el mecanismo es alguno de los
-candidatos de arriba (o algo distinto), y con eso sí se puede decidir el fix
-real (lo más probable: agrupar primero por (exchange, symbol) y quedarse
-con una sola fila por exchange antes de emparejar entre exchanges).
+con el `raw_symbol` real de ambas piernas, como tabla (no JSON anidado, que
+Streamlit pagina en rangos `[0-99]`/`[100-122]` ilegibles en una captura) y
+con un recuento automático de cuántas filas tienen `raw_symbol` idéntico
+entre las dos piernas frente a distinto. `compute_opportunities()` en sí NO
+se ha tocado — no se descarta nada todavía.
+
+**Resultado del primer despliegue con este diagnóstico**: 128/128 filas
+tienen `long_raw_symbol == short_raw_symbol` EXACTAMENTE IGUAL (ej. "1000CAT"
+en bitget: `long_raw_symbol="1000CAT/USDT:USDT"`,
+`short_raw_symbol="1000CAT/USDT:USDT"`, ambos con el mismo APR). **Esto
+descarta los tres candidatos de código planteados arriba** (quarterly
+futures colándose en el filtro de ccxt, variantes de quote/margen en
+MEXC/KuCoin) — todos predecían dos raw_symbol DISTINTOS, y salieron 0. Es
+un duplicado literal del mismo contrato, no dos contratos reales
+colisionando.
+
+Revisado el código de `compute_opportunities()`
+(`by_symbol[r.symbol].append(r)` + `if len(group) < 2: continue` +
+`min()`/`max()`) y de `core/data_service.py::fetch_normalized_rates()`
+(`build_connectors()` construye cada exchange una sola vez —
+`ALL_CEX_FACTORIES`/`ALL_DEX_FACTORIES` no tienen ningún factory duplicado,
+comprobado con `collections.Counter` sobre sus nombres — y el bucle solo
+llama a `conn.fetch_funding_rates()` una vez por conector, sin acumular
+entre reruns de Streamlit ni mutar `all_rates` después de `load_data()`),
+ninguno de los dos explica por sí solo cómo `rates` puede contener el mismo
+(exchange, raw_symbol) dos veces — un `dict` de Python (que es lo que
+itera `cex_ccxt.py` vía `raw.items()`) no puede tener la misma clave
+repetida. El duplicado, si viene de ahí, tendría que originarse dentro de
+la propia llamada `self._client.fetch_funding_rates()` de ccxt para
+bitget, no confirmado aún porque la red de este sandbox de desarrollo
+bloquea la conexión a bitget con 403 en el CONNECT (mismo bloqueo que con
+okx/gate, ver sección de arriba).
+
+**Segundo diagnóstico añadido, más fino** (`core/data_service.py`): ahora,
+justo al salir de CADA conector por separado (antes de fusionar nada entre
+exchanges), se cuenta si ese conector YA devolvió algún `raw_symbol`
+repetido dentro de su propia llamada (`logger.warning` con
+`Counter(r.raw_symbol for r in rates)`), y por separado, tras fusionar
+TODOS los conectores, si aparece algún `(exchange, raw_symbol)` repetido
+que no estuviera ya en el chequeo individual. Esto aísla de una vez si el
+duplicado nace dentro del propio `fetch_funding_rates()` de bitget (ccxt/el
+exchange devolviéndolo así) o se genera después, al fusionar los
+conectores en este pipeline — cualquiera de los dos casos queda confirmado
+con el próximo log de despliegue, sin necesidad de adivinar. Probado con un
+conector falso que devuelve el mismo raw_symbol dos veces: el aviso sale
+exactamente como se espera.
 
 ## Investigando (2026-09-18): dónde poner un piso de liquidez mínima
 

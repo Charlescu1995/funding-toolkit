@@ -551,6 +551,21 @@ símbolo descartado, ver más abajo). Vertex y ApeX, no — cada uno por un moti
   que también dieron 403 — probablemente RWA con acceso restringido por compliance, no
   fantasmas; no rompen nada, solo generan algo de log residual.
 
+  **Actualización (2026-09-18) — ya no es ese ruido, es un bloqueo de red nuevo.** El
+  usuario preguntó por este error viendo un despliegue donde ApeX dio 403 en
+  **186/186 símbolos (el 100%)**, incluidos cripto reales que antes sí respondían
+  (SOLUSDT, XRPUSDT, 1000SHIBUSDT). Eso ya no encaja con el patrón de arriba (que
+  dejaba pasar los cripto reales y solo bloqueaba mercados de predicción/apuestas) —
+  es el mismo patrón de bloqueo a nivel de red/IP que ya sufren Binance, Bybit y
+  Vertex desde Streamlit Cloud (ver más arriba y más abajo en este README):
+  probablemente ApeX empezó a bloquear también el rango de IPs de Streamlit Cloud.
+  No hay nada que arreglar en el código — el conector ya lo maneja igual que los
+  demás exchanges bloqueados (falla ese exchange en concreto, se ve en el banner
+  "Algunos exchanges no respondieron", el resto de la app sigue funcionando). Se
+  mejoró el mensaje de error en `connectors/dex_apex.py` para decir explícitamente
+  "esto es un bloqueo de red, no un bug" cuando el 100% de los fallos son 403, en vez
+  de dejar que parezca el mismo ruido de mercados de predicción ya conocido.
+
 ### CEX nuevos, sexta tanda (KuCoin, MEXC, HTX — conector propio en vez de ccxt)
 
 KuCoin Futures, MEXC Futures y HTX (Huobi) estaban en la lista de 8 CEX desde
@@ -1101,15 +1116,55 @@ Verificado con un test que usa los valores EXACTOS que vio el usuario
 (CAKE/BERA/APEX se descartan; `None` sin consultar y volumen real en
 ambas piernas NO se descartan).
 
-Esto es un parche corriente abajo, no la causa raíz: puede que el propio
-endpoint de Extended traiga un campo de estado (tipo "status"/"active"/
-"tradingEnabled") que señale que el mercado está inactivo, igual que ccxt
-expone `active` para el caso de Aster — y que el conector de Extended
-(que es propio, no ccxt) simplemente no lo esté mirando todavía. Se añadió
-un diagnóstico (`logger.warning` en `connectors/dex_extended.py`) que
-vuelca la fila CRUDA completa (todos los campos) para hasta 6 mercados con
-Vol 24h calculado = $0 — pendiente de un despliegue más para confirmar si
-hay un campo así y filtrar en el origen, igual que ya se hace con Aster.
+Esto es un parche corriente abajo, no la causa raíz: se añadió un
+diagnóstico (`logger.warning` en `connectors/dex_extended.py`) que vuelca
+la fila CRUDA completa (todos los campos) para hasta 6 mercados con Vol
+24h calculado = $0, para confirmar con datos reales si hay un campo de
+estado que se esté ignorando y así poder filtrar en el origen, igual que
+ya se hace con Aster — pendiente de un despliegue más.
+
+**Actualización — el parche de arriba (Vol 24h == $0) estaba MAL, no solo
+incompleto.** El usuario redesplegó y pegó el log con el diagnóstico ya en
+marcha. La fila cruda de dos mercados reales lo dejó clarísimo:
+
+```
+{"name": "INTU-USD", "category": "RWA", "subCategory": "Equity",
+ "active": true, "status": "ACTIVE", "isOffHours": true,
+ "tradingHours": "NO_OVERNIGHT", "marketStats": {"dailyVolume": "0.000000", ...}}
+
+{"name": "NOW_24_5-USD", "category": "RWA", "subCategory": "Equity",
+ "active": true, "status": "DELISTED", "tradingHours": "WEEKDAYS",
+ "marketStats": {"dailyVolume": "0", ...}}
+```
+
+**INTU** (Intuit, una acción tokenizada real) tiene `status: "ACTIVE"` —
+es un mercado real y operable, solo que está `isOffHours: true` (fuera del
+horario de la bolsa real, "NO_OVERNIGHT") — Vol 24h = $0 en ese momento es
+lo esperable, NO un mercado fantasma, igual que cualquier acción de EEUU
+fuera de las 9:30-16:00 ET. **NOW_24_5** (ServiceNow) sí tiene `status:
+"DELISTED"` — ese sí es el mercado muerto de verdad. La prueba de fuego:
+el aviso de "65 oportunidades descartadas" que generaba
+`has_zero_volume_leg()` incluía "INTU" junto a una veintena más de
+tickers de acciones reales (ABNB, ADSK, AXON, BKNG, DDOG, GILD, GPS, HIMS,
+JCI, LIN, MCHP, MELI, MPWR, MRNA, REGN, RIOT, TEAM, TMUS, VRTX...) — el
+filtro de volumen estaba sacando del ranking mercados RWA legítimos solo
+por estar fuera de su horario de bolsa, que es su estado normal la mayor
+parte del día. Un heurístico basado en un síntoma downstream (volumen)
+resultó tener más de una causa posible, y una de ellas era completamente
+legítima.
+
+**Fix correcto, esta vez sí en el origen**: `connectors/dex_extended.py`
+ahora descarta los mercados por el campo `status` que la propia API ya
+trae (cualquier valor distinto de "ACTIVE"; de momento solo se ha visto
+"DELISTED" en producción) — mismo patrón que `active` en ccxt para Aster
+(ver más arriba en este README). Un `status` ausente NO se descarta, por
+no haber evidencia de que signifique nada malo. **`has_zero_volume_leg()`
+se retiró** de `core/opportunities.py` (se dejó una nota explicando por
+qué, en vez de borrarlo sin rastro, mismo criterio que la historia de
+`PRICE_SCALE` en `connectors/dex_grvt.py`) junto con su aviso/panel de
+diagnóstico en `pages/1_Funding_Rates.py`. Verificado con un test que usa
+los valores EXACTOS de INTU y NOW_24_5 del log real: INTU se conserva
+(Vol 24h=$0 pero ACTIVE), NOW_24_5 se descarta (DELISTED).
 
 ## Importante sobre dónde correr esto
 

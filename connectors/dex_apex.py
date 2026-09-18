@@ -108,6 +108,24 @@ porque no hay forma fiable de distinguirlos de un cripto real solo por el
 nombre; si siguen fallando no rompen nada (se registran como error por
 símbolo, sin tirar el resto), solo generan algo de ruido en el log.
 
+--- Actualización (2026-09-18): 403 en TODOS los símbolos, incluidos cripto
+    reales — ya no es el ruido de arriba, es un bloqueo de red nuevo ---
+
+El primer despliegue (arriba) tenía 89 pares reales funcionando y 271/370
+símbolos candidatos con 403 — pero esos 271 eran casi todos mercados de
+predicción/apuestas, ruido esperado y ya filtrado. En un despliegue
+posterior, SOLUSDT, XRPUSDT, 1000SHIBUSDT — símbolos cripto reales que antes
+sí respondían — empezaron a dar 403 también, y terminaron siendo 186/186 (el
+100%). Un 403 en el 100% de los símbolos, incluidos los que antes funcionaban,
+ya no encaja con el patrón "ruido de mercados de predicción" de arriba: es el
+mismo patrón de bloqueo a nivel de red/IP que ya sufren Binance, Bybit y
+Vertex desde este mismo despliegue (ver README) — probablemente ApeX empezó
+a bloquear el rango de IPs de Streamlit Cloud. No hay nada que arreglar en
+el código: el conector ya falla igual que los demás (se ve en el banner
+"Algunos exchanges no respondieron"), sin tirar el resto de la app. Se
+mejoró el mensaje de error para distinguir este caso (todos 403) del caso
+genérico, para no tener que releer el log entero para saber cuál es.
+
 --- Nota sobre volumen 24h (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
 
 El mismo `/v3/ticker` que ya se pide por símbolo (ver arriba — no es una
@@ -287,10 +305,24 @@ class ApexConnector:
 
         if not out:
             sample = dict(list(errors.items())[:3])
+            # Ver docstring, sección "403 en TODOS los símbolos": si el 100%
+            # de los errores son 403, ya no es el ruido conocido de mercados
+            # de predicción (eso deja pasar los cripto reales) — es el mismo
+            # patrón de bloqueo de red/IP que Binance/Bybit/Vertex. Se dice
+            # explícitamente para no tener que releer el log entero.
+            all_forbidden = bool(errors) and all("403" in msg for msg in errors.values())
+            motivo = (
+                "TODOS los símbolos (incluidos cripto reales como SOLUSDT/XRPUSDT) dieron "
+                "403 Forbidden — no es ruido de mercados de predicción, es el mismo bloqueo "
+                "de red/IP que ya sufren Binance/Bybit/Vertex desde este despliegue (ver "
+                "README), no un bug de este conector"
+                if all_forbidden
+                else "fallos mixtos, ver la muestra de errores"
+            )
             raise RuntimeError(
                 f"apex: {len(errors)}/{len(market_symbols)} símbolos fallaron y "
-                f"{no_ticker} no tenían ticker operable — no quedó ningún par válido. "
-                f"Muestra de errores: {sample}"
+                f"{no_ticker} no tenían ticker operable — no quedó ningún par válido "
+                f"({motivo}). Muestra de errores: {sample}"
             )
         elif errors:
             logger.warning(

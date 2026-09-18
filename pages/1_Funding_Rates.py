@@ -25,7 +25,6 @@ from core.opportunities import (
     fetch_oi_for_targets,
     has_dead_liquidity,
     has_implausible_price_pair,
-    has_zero_volume_leg,
 )
 
 # Cuántas oportunidades (de arriba del ranking) se enriquecen con OI Depth
@@ -206,7 +205,6 @@ st.divider()
 oi_errors: dict[tuple[str, str], str] = {}  # se rellena en la pestaña Ranking, se enseña en Diagnóstico
 dead_liquidity: list = []  # idem — oportunidades descartadas por OI $0 confirmado (ver has_dead_liquidity)
 implausible_pairs: list = []  # idem — descartadas por Price Spread implausible (ver has_implausible_price_pair)
-zero_volume_legs: list = []  # idem — descartadas por Vol 24h $0 confirmado en una pierna (ver has_zero_volume_leg)
 tab_ranking, tab_matrix, tab_history = st.tabs(["🏆 Ranking", "🔲 Matriz", "📈 Histórico"])
 
 with tab_ranking:
@@ -240,25 +238,6 @@ with tab_ranking:
                 "corto normalizado. Detalle en el diagnóstico de abajo."
             )
 
-        # Ver core/opportunities.py::has_zero_volume_leg — bug real
-        # encontrado en producción (2026-09-16): CAKE/BERA/APEX tenían la
-        # pierna de Extended con Vol 24h exactamente $0 (mercado fantasma,
-        # confirmado por el usuario contra la interfaz real de Extended —
-        # ni siquiera aparece listado ahí). No hace falta ninguna llamada
-        # extra: el volumen ya viene en el fetch masivo, a diferencia del
-        # OI Depth de abajo.
-        zero_volume_legs = [o for o in opportunities if has_zero_volume_leg(o)]
-        opportunities = [o for o in opportunities if not has_zero_volume_leg(o)]
-
-        if zero_volume_legs:
-            symbols_zero_vol = ", ".join(sorted({o.symbol for o in zero_volume_legs}))
-            st.caption(
-                f"⚠️ {len(zero_volume_legs)} oportunidad(es) descartada(s) del ranking por Vol 24h "
-                f"$0 confirmado en una de las dos piernas ({symbols_zero_vol}) — nadie se ha movido "
-                "ahí en todo un día, probable mercado fantasma (mismo patrón que Aster/STORJ, ver "
-                "README). Detalle en el diagnóstico de abajo."
-            )
-
         # OI Depth real para las mejores oportunidades: los CEX no lo traen
         # en el fetch masivo de funding rates (ccxt no expone un endpoint
         # bulk para eso), así que se pide aparte, solo para el top N y con
@@ -286,7 +265,7 @@ with tab_ranking:
         if not opportunities:
             st.info(
                 "Todas las oportunidades del top se descartaron — ver los avisos de arriba (Open "
-                "Interest $0 confirmado, Vol 24h $0 confirmado y/o Price Spread implausible)."
+                "Interest $0 confirmado y/o Price Spread implausible)."
             )
 
         df = pd.DataFrame(
@@ -443,27 +422,6 @@ if implausible_pairs:
                     "price_spread_pct": f"{o.price_spread_pct:.2f}%",
                 }
                 for o in sorted(implausible_pairs, key=lambda o: o.price_spread_pct, reverse=True)
-            ]
-        )
-
-if zero_volume_legs:
-    with st.expander(
-        f"Diagnóstico: {len(zero_volume_legs)} oportunidad(es) descartada(s) por Vol 24h $0"
-    ):
-        st.caption(
-            "Ver core/opportunities.py::has_zero_volume_leg. No es un fallo de conexión (eso sale "
-            "en 'OI Depth no disponible' de abajo) — es el exchange respondiendo que en las "
-            "últimas 24h no hubo ningún volumen negociado en esa pierna."
-        )
-        st.json(
-            [
-                {
-                    "símbolo": o.symbol,
-                    "long": f"{o.long_exchange} (Vol 24h {_fmt_usd(o.volume_long_usd)})",
-                    "short": f"{o.short_exchange} (Vol 24h {_fmt_usd(o.volume_short_usd)})",
-                    "spread_apr_descartado": f"{o.spread_apr:.1f}%",
-                }
-                for o in zero_volume_legs
             ]
         )
 

@@ -22,30 +22,61 @@ price:
 
     volume_24h_usd = dailyVolume   (directo, sin conversión)
 
---- Mercados fantasma sospechados (bug real reportado en producción, 2026-09-16) ---
+--- Mercados fantasma: bug real, y luego el primer intento de arreglo
+    también estaba mal (2026-09-16) ---
 
 El usuario vio en el ranking "CAKE" (mexc/extended), "BERA" (lighter/extended)
 y "APEX" (lighter/extended) con la pierna de Extended mostrando un Open
-Interest mínimo (decenas/cientos de $) y Vol 24h EXACTAMENTE $0, y confirmó
-contra la interfaz real de Extended que "CAKE" ni siquiera aparece listado
-ahí — parece el mismo patrón de mercado "fantasma" ya conocido con Aster/
-STORJ (ver README y core/opportunities.py::has_dead_liquidity), solo que aquí
-el OI no llega a ser exactamente $0 así que solo el volumen lo delata. Ya se
-descartan del ranking (ver has_zero_volume_leg en core/opportunities.py), pero
-eso es un parche corriente abajo, no arregla la causa raíz: puede que este
-mismo endpoint bulk traiga un campo de estado (algo tipo "status"/"active"/
-"tradingEnabled" en `row` o en `marketStats`) que señale que el mercado está
-inactivo/delistado, igual que ccxt expone `active` para Aster — y que
-simplemente no se esté mirando todavía. Se añadió un diagnóstico
-(`logger.warning`, ver más abajo) que vuelca la fila CRUDA completa (todos
-los campos, no solo los que ya se usan) para hasta 6 mercados con Vol 24h
-calculado = $0, pendiente de un despliegue más para confirmarlo con datos
-reales antes de filtrar en el origen en vez de corriente abajo.
+Interest mínimo y Vol 24h EXACTAMENTE $0, y confirmó contra la interfaz real
+de Extended que "CAKE" ni siquiera aparece listado ahí. Primer intento de
+arreglo: descartar del ranking cualquier oportunidad con Vol 24h == $0
+confirmado en una pierna (`has_zero_volume_leg`, ahora RETIRADO — ver
+core/opportunities.py). Se añadió también un diagnóstico que volcaba la fila
+CRUDA completa de `row` para los mercados con Vol 24h = $0, para buscar la
+causa raíz en vez de quedarse con el parche corriente abajo.
+
+**Ese diagnóstico, con datos reales, demostró que el parche corriente abajo
+estaba MAL** — no simplemente incompleto, sino que descartaba mercados
+completamente legítimos. La fila cruda trajo dos casos reales y muy
+distintos entre sí:
+
+    {"name": "INTU-USD", "category": "RWA", "subCategory": "Equity",
+     "active": true, "status": "ACTIVE", "isOffHours": true,
+     "tradingHours": "NO_OVERNIGHT",
+     "marketStats": {"dailyVolume": "0.000000", ...}}
+
+    {"name": "NOW_24_5-USD", "category": "RWA", "subCategory": "Equity",
+     "active": true, "status": "DELISTED", "tradingHours": "WEEKDAYS",
+     "marketStats": {"dailyVolume": "0", ...}}
+
+INTU (Intuit, una acción tokenizada real) tiene `status: "ACTIVE"` — es un
+mercado real y operable, solo que ahora mismo está `isOffHours: true`
+("NO_OVERNIGHT": fuera del horario de mercado de la bolsa real, como
+cualquier acción de EEUU fuera de las 9:30-16:00 ET) — Vol 24h = $0 en ese
+momento es exactamente lo esperable, NO un mercado fantasma. NOW_24_5
+(ServiceNow) sí tiene `status: "DELISTED"` — ese SÍ es el mercado muerto de
+verdad. La prueba de fuego: revisando el aviso de "65 oportunidades
+descartadas" que generó `has_zero_volume_leg()`, ahí aparecía "INTU" junto a
+una veintena más de tickers de acciones reales (ABNB, ADSK, AXON, BKNG,
+DDOG, GILD, GPS, HIMS, JCI, LIN, MCHP, MELI, MPWR, MRNA, REGN, RIOT, TEAM,
+TMUS, VRTX...) — el filtro de volumen estaba tirando del ranking mercados
+RWA perfectamente legítimos solo por estar fuera de su horario de bolsa,
+que es su estado normal la mayor parte del día.
+
+**Fix correcto, en el origen**: usar el campo `status` que la propia API ya
+trae — igual patrón que `active` en ccxt para Aster (ver cex_ccxt.py) — en
+vez de inferir "fantasma" por un síntoma downstream (volumen) que también
+lo produce una causa perfectamente legítima (horario de mercado). Se
+descartan aquí los mercados con `status` distinto de "ACTIVE" (de momento
+solo se ha visto "DELISTED" en producción, pero cualquier estado que no sea
+"ACTIVE" se trata igual); un `status` ausente NO se descarta (no hay
+evidencia de que signifique nada malo, se deja pasar). `has_zero_volume_leg()`
+se retiró — un mercado ACTIVE fuera de horario es una operación real que
+ahora mismo no tiene volumen, no una fila fantasma.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 
 import requests
@@ -75,30 +106,24 @@ class ExtendedConnector:
         payload = resp.json()
         rows = payload.get("data", [])
 
-        # Diagnóstico (2026-09-16): el usuario reportó "¿qué ha pasado con
-        # APEX?" y "he buscado CAKE en Extended y no sale" — CAKE/BERA/APEX
-        # traían, los tres, OI mínimo-pero-no-cero y Vol 24h exactamente $0
-        # en la pierna de Extended (ver has_zero_volume_leg en
-        # core/opportunities.py, ya se descartan del ranking). El usuario
-        # confirmó contra la interfaz real de Extended que "CAKE" ni
-        # siquiera aparece listado ahí -- mismo patrón "fantasma" que
-        # Aster/STORJ (README), pero para ese caso el conector de ccxt SÍ
-        # tiene un campo `active`/estado que lo detecta en origen (ver
-        # cex_ccxt.py). Extended es un conector propio (no ccxt) y hasta
-        # ahora no comprobaba ningún campo de estado -- puede que
-        # `marketStats`/`row` sí traiga uno (ej. "status"/"active"/
-        # "tradingEnabled") y simplemente no se estuviera mirando. Se
-        # vuelca aquí la fila CRUDA completa (todos los campos, no solo los
-        # que ya usamos) para hasta 6 mercados con esta firma sospechosa
-        # (Vol 24h calculado = 0), para poder comparar contra la respuesta
-        # real y encontrar el campo correcto en vez de seguir adivinando
-        # solo por el síntoma downstream.
-        ghost_diagnostic_samples: list[dict] = []
+        # Ver docstring del módulo, sección "Mercados fantasma": confirmado
+        # con datos reales que `status` (no el volumen) es la señal fiable
+        # de mercado muerto — "DELISTED" en producción para NOW_24_5-USD,
+        # frente a "ACTIVE" para un mercado real simplemente fuera de
+        # horario de bolsa (INTU-USD, Vol 24h = $0 ahí mismo pero legítimo).
+        # Un `status` ausente no se descarta -- no hay evidencia de que
+        # signifique nada malo.
+        ghost_symbols: list[str] = []
 
         out: list[FundingRate] = []
         for row in rows:
             if row.get("type") not in (None, "PERPETUAL"):
                 continue  # nos saltamos mercados spot si el endpoint los mezclara
+
+            status = row.get("status")
+            if status is not None and status != "ACTIVE":
+                ghost_symbols.append(f"{row.get('name')} (status={status})")
+                continue
 
             raw_symbol = row.get("name")  # ej. "BTC-USD"
             stats = row.get("marketStats") or {}
@@ -118,9 +143,6 @@ class ExtendedConnector:
             volume_24h_raw = stats.get("dailyVolume")
             volume_24h_usd = float(volume_24h_raw) if volume_24h_raw is not None else None
 
-            if volume_24h_usd == 0 and len(ghost_diagnostic_samples) < 6:
-                ghost_diagnostic_samples.append(row)
-
             out.append(
                 FundingRate(
                     exchange="extended",
@@ -136,14 +158,12 @@ class ExtendedConnector:
                 )
             )
 
-        if ghost_diagnostic_samples:
+        if ghost_symbols:
             logger.warning(
-                "extended DIAGNÓSTICO %d mercado(s) con Vol 24h calculado = $0 (posible fantasma, "
-                "ver docstring más arriba y has_zero_volume_leg en core/opportunities.py) — fila "
-                "CRUDA completa tal cual la API, para buscar un campo de estado que no se esté "
-                "mirando todavía: %s",
-                len(ghost_diagnostic_samples),
-                json.dumps(ghost_diagnostic_samples)[:4000],
+                "extended: %d mercado(s) descartado(s) por status distinto de ACTIVE (delistado, "
+                "ver README/docstring de este módulo): %s",
+                len(ghost_symbols),
+                ghost_symbols[:10],
             )
 
         return out

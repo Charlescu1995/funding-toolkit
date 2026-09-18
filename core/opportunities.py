@@ -234,37 +234,27 @@ def has_dead_liquidity(opp: OpportunityRow) -> bool:
     return opp.oi_long_usd == 0 or opp.oi_short_usd == 0
 
 
-def has_zero_volume_leg(opp: OpportunityRow) -> bool:
-    """
-    True si el volumen de 24h de una de las dos piernas es CONFIRMADO
-    exactamente $0 — no que no se haya podido consultar (eso es `None`, y
-    se deja tal cual, como "—" en la interfaz), sino que el propio
-    exchange respondió que en las últimas 24h no se movió absolutamente
-    nada en ese mercado.
-
-    Encontrado en producción (2026-09-16, mismo día que el bug de choque de
-    símbolos de arriba): el usuario reportó "¿qué ha pasado con APEX?" y
-    "he buscado CAKE en Extended y no sale" al ver la tabla de Ranking.
-    Revisando los datos: "CAKE" (mexc/extended), "BERA" (lighter/extended)
-    y "APEX" (lighter/extended) tenían, los tres, la pierna de Extended con
-    un Open Interest mínimo pero NO exactamente $0 (41, 64 y 810 dólares
-    respectivamente — por eso `has_dead_liquidity()` no los pillaba, ese
-    filtro exige el $0 exacto) y Vol 24h EXACTAMENTE $0. El usuario
-    confirmó contra la interfaz real de Extended que "CAKE" ni siquiera
-    aparece listado ahí — no es un mercado real y operable, es el mismo
-    patrón "fantasma" ya visto con Aster/STORJ (ver has_dead_liquidity),
-    solo que aquí lo delata el volumen en vez del OI. A diferencia del OI
-    Depth (que solo se pide para el top N por una llamada aparte), el
-    volumen de 24h de Extended ya viene directo en el fetch masivo (ver
-    connectors/dex_extended.py), así que este filtro se puede aplicar a
-    TODAS las oportunidades sin gastar ninguna llamada extra.
-
-    Un mercado sin ningún volumen en 24h no es una oportunidad ejecutable
-    de verdad por mucho que el spread de APR salga enorme — nadie se ha
-    movido ahí en todo un día. Se usa para sacar del ranking esas filas
-    "fantasma", mismo criterio que has_dead_liquidity().
-    """
-    return opp.volume_long_usd == 0 or opp.volume_short_usd == 0
+# RETIRADO (2026-09-16): hubo aquí un has_zero_volume_leg() que descartaba
+# cualquier oportunidad con Vol 24h CONFIRMADO en $0 en una pierna — nació de
+# un caso real (CAKE/BERA/APEX en Extended, confirmado por el usuario contra
+# la interfaz real de Extended como mercados fantasma), pero la propia
+# oportunidad de diagnosticarlo en origen (ver connectors/dex_extended.py)
+# demostró que el heurístico era demasiado ancho: "INTU" y una veintena más
+# de acciones RWA reales (ABNB, ADSK, AXON, BKNG, DDOG, GILD...) tienen
+# Vol 24h = $0 la mayor parte del día simplemente por estar fuera de su
+# horario de bolsa (`status: "ACTIVE"`, `isOffHours: true`) — no son mercados
+# fantasma, son mercados reales cerrados en ese momento, igual que cualquier
+# acción de EEUU a las 3 de la madrugada. El aviso de "oportunidades
+# descartadas" que generaba este filtro incluía esos tickers reales junto a
+# los fantasma de verdad, así que estaba tirando datos legítimos del
+# ranking. El fix correcto está en el conector de Extended: usar el campo
+# `status` que la propia API ya trae ("DELISTED" para un mercado muerto de
+# verdad, frente a "ACTIVE" para uno simplemente fuera de horario) en vez de
+# inferir "fantasma" por un síntoma downstream (volumen) que tiene más de
+# una causa posible. Se deja esta nota en vez de borrar sin más rastro,
+# mismo criterio que la historia de PRICE_SCALE en connectors/dex_grvt.py —
+# para que quede constancia de por qué este heurístico concreto no vale,
+# y no se reintente sin más el mismo camino más adelante.
 
 
 # Bug real encontrado en producción (2026-09-16): el panel de diagnóstico

@@ -437,19 +437,35 @@ if same_exchange_pairs:
             "vencimiento, o dos variantes de quote/margen), eso confirma el mecanismo — si son "
             "IDÉNTICOS, sería otra cosa (duplicado literal en la respuesta del exchange/conector)."
         )
-        st.json(
+        # Calculado aquí mismo, no hace falta que el usuario compare 123 filas
+        # a ojo en un JSON anidado (que Streamlit pagina en rangos [0-99]/
+        # [100-122] e ilegible en una captura): cuenta cuántas de estas filas
+        # tienen raw_symbol IDÉNTICO en las dos piernas (duplicado literal)
+        # frente a cuántas tienen dos raw_symbol DISTINTOS (dos contratos
+        # reales del mismo exchange colisionando al normalizar).
+        n_identical = sum(1 for o in same_exchange_pairs if o.long_raw_symbol == o.short_raw_symbol)
+        n_different = len(same_exchange_pairs) - n_identical
+        st.caption(
+            f"De {len(same_exchange_pairs)} filas: **{n_identical}** tienen long_raw_symbol == "
+            f"short_raw_symbol EXACTAMENTE IGUAL (duplicado literal del mismo contrato) y "
+            f"**{n_different}** tienen raw_symbol DISTINTO (dos contratos reales distintos del "
+            "mismo exchange colisionando al normalizar). La tabla de abajo ya viene ordenada por eso."
+        )
+        same_exchange_df = pd.DataFrame(
             [
                 {
-                    "símbolo (normalizado)": o.symbol,
-                    "exchange": o.long_exchange,
+                    "Símbolo": o.symbol,
+                    "Exchange": o.long_exchange,
                     "long_raw_symbol": o.long_raw_symbol,
                     "short_raw_symbol": o.short_raw_symbol,
+                    "raw_symbol idéntico": o.long_raw_symbol == o.short_raw_symbol,
                     "long_apr": f"{o.long_apr:.4f}%",
                     "short_apr": f"{o.short_apr:.4f}%",
                 }
                 for o in same_exchange_pairs
             ]
-        )
+        ).sort_values(["raw_symbol idéntico", "Exchange", "Símbolo"])
+        st.dataframe(same_exchange_df, use_container_width=True, hide_index=True, height=400)
 
 if implausible_pairs:
     with st.expander(

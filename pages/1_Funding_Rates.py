@@ -465,7 +465,7 @@ if same_exchange_pairs:
                 for o in same_exchange_pairs
             ]
         ).sort_values(["raw_symbol idéntico", "Exchange", "Símbolo"])
-        st.dataframe(same_exchange_df, use_container_width=True, hide_index=True, height=400)
+        st.dataframe(same_exchange_df, width="stretch", hide_index=True, height=400)
 
 if implausible_pairs:
     with st.expander(

@@ -968,16 +968,40 @@ mark_price mal escalado en otra ronda de este mismo bug, esto también lo
 arregla. La guardia de cordura (`IMPLAUSIBLE_SPREAD_PCT`) se mantiene como
 red de seguridad permanente, no solo para este caso.
 
-**Pendiente, NO tocado en esta ronda**: la pierna de GRVT sigue mostrando
-sistemáticamente APR ~0.0% en las capturas del usuario (`funding_rate_8h_curr`
-× `CENTIBEEPS_TO_DECIMAL`, ÷1e6) — el mismo patrón de "posible sobre-escalado"
-que ya vimos tres veces con otros campos, pero esta vez sin un valor crudo
-todavía confirmado en un log real para probarlo. Se añadió el valor crudo de
-`funding_rate_8h_curr` (y el calculado) al mismo diagnóstico, así que el
-próximo log ya lo va a traer sin pedir nada nuevo. No se cambió la fórmula a
-ciegas porque, a diferencia de los tres campos de arriba, aquí el riesgo de
-equivocarse en la otra dirección (pasar de "demasiado pequeño" a "un millón
-de veces demasiado grande") es peor que dejarlo pendiente un despliegue más.
+**Actualización (2026-09-18) — CONFIRMADO y corregido**: la pierna de GRVT
+mostraba sistemáticamente APR ~0.0% (`funding_rate_8h_curr` ×
+`CENTIBEEPS_TO_DECIMAL`, ÷1e6) — el mismo patrón de "posible sobre-escalado"
+que ya se vio tres veces con otros campos. Se dejó el valor crudo en el
+diagnóstico (sin tocar la fórmula a ciegas, por el riesgo asimétrico de
+pasar de "demasiado pequeño" a "un millón de veces demasiado grande") hasta
+tener evidencia real. Confirmado con **tres despliegues independientes en
+producción**, guardando `funding_rate_8h_curr` crudo para una muestra de
+instrumentos:
+
+    AAVE_USDT_Perp:       raw="0.01"   (visto 2 veces)
+    ADA_USDT_Perp:        raw="0.01"   (visto 2 veces)
+    ANTHROPIC_USDT_Perp:  raw="0.005"  (visto 2 veces)
+    ARB_USDT_Perp:        raw="0.01"
+    AMAT_USDT_Perp:       raw="0.013"
+    AMZN_USDT_Perp:       raw="0.0129"
+    AAOI_USDT_Perp / AAPL_USDT_Perp / AI16Z / AMD / ARM: raw="0.0"
+
+Con `× CENTIBEEPS_TO_DECIMAL` (1e-6), AAVE (raw=0.01) da una fracción de
+1e-8 → APR≈0.001%, indistinguible de cero — exactamente el "+0.0%" que se
+veía en el ranking. La magnitud real (0.005 a 0.013) encaja con un % humano
+directo del periodo de 8h, el mismo patrón que ya tuvieron mark_price/
+open_interest/volumen de GRVT. **Fix aplicado**: `funding_rate =
+float(rate_raw) / 100.0` en vez de `× CENTIBEEPS_TO_DECIMAL` (que se deja
+definida pero sin uso, mismo criterio que `PRICE_SCALE`). Con esto: AAVE/
+ADA/ARB → 10.95% APR, AMAT → 14.235%, AMZN → 14.1255%, ANTHROPIC → 5.475% —
+cifras de funding normales, y los raw="0.0" (AAOI, AAPL, AI16Z, AMD, ARM)
+siguen dando exactamente 0%. El diagnóstico `funding_rate_raw`/
+`funding_rate_calculado` se mantiene activo por si esta interpretación
+también resultara estar mal. Verificado con un test que usa los valores
+EXACTOS de los tres despliegues de arriba (`connectors/dex_grvt.py` +
+`core/normalize.py`). **Pendiente de confirmación en producción**: el
+usuario debe redesplegar y comprobar que el APR de GRVT ya no sale
+sistemáticamente en "+0.0%" para símbolos como AAVE/ADA/ARB.
 
 **Confirmado por el usuario en producción**: "La parte de GRVT parece
 arreglada" — el fix de arriba (quitar toda la división de mark_price/OI/
@@ -1308,10 +1332,11 @@ investigar todavía:
   - **Las 47 filas donde participa GRVT muestran las 47 exactamente
     "+0.0%" de funding**, incluyendo activos muy líquidos (LINK, ADA, AVAX,
     UNI, AAVE, ARB, JUP, con Cuello de botella OI de cientos de miles de
-    dólares) — refuerza la sospecha ya documentada más abajo sobre
-    `funding_rate_8h_curr` × `CENTIBEEPS_TO_DECIMAL` en
-    `connectors/dex_grvt.py`, pero sigue sin confirmarse con un valor crudo
-    real de un símbolo líquido.
+    dólares) — este era el mismo bug de `funding_rate_8h_curr` ×
+    `CENTIBEEPS_TO_DECIMAL`, **ya confirmado y corregido el 2026-09-18** (ver
+    sección de GRVT/funding más arriba: `/ 100.0` en vez de
+    `× CENTIBEEPS_TO_DECIMAL`). Pendiente de confirmación en producción con
+    un nuevo CSV tras el redespliegue.
 
 ## Importante sobre dónde correr esto
 

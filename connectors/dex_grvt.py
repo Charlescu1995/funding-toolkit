@@ -236,22 +236,44 @@ un campo que sí lo necesite, para no perder el nombre). El diagnóstico
 (`logger.warning`) SE MANTIENE activo — más vale un log de más que otra
 ronda a ciegas si algo vuelve a no cuadrar.
 
-**Funding rate — sospecha SIN confirmar todavía, no tocado en esta ronda**:
-en las capturas del usuario, la pierna de GRVT muestra sistemáticamente
-"+0.0%"/"-0.1%"/"-0.2%" de APR, mientras que las otras piernas del mismo
-par muestran cifras normales — el mismo patrón de "algo se está escalando
-de más" que ya vimos con precio/OI/volumen, esta vez aplicado a
-`funding_rate_8h_curr` × `CENTIBEEPS_TO_DECIMAL` (÷1e6). Es muy probable que
-este campo tenga el mismo problema (GRVT devolviendo ya el número humano en
-vez de una unidad "centibeeps" que haya que convertir), pero a diferencia de
-precio/OI/volumen NO hay todavía un valor crudo confirmado en un log real
-para probarlo — cambiarlo a ciegas, y encima en la dirección contraria (de
-"demasiado pequeño" a potencialmente "un millón de veces más grande" si la
-asunción nueva también fuera errónea), es más arriesgado que dejarlo
-pendiente. Se añadió el valor crudo de `funding_rate_8h_curr` al diagnóstico
-de abajo para confirmarlo con datos reales antes de tocar la fórmula.
+**Funding rate — CONFIRMADO y corregido (2026-09-18)**: la sospecha de
+arriba (funding sistemáticamente en "+0.0%" mientras las otras piernas del
+mismo par muestran cifras normales) se confirmó con TRES despliegues
+independientes, separados varios minutos entre sí, guardando el valor crudo
+de `funding_rate_8h_curr` para una muestra de instrumentos:
 
---- ESTADO ACTUAL CONFIRMADO (2026-09-16) ---
+    AAVE_USDT_Perp:       raw="0.01"   (visto 2 veces)
+    ADA_USDT_Perp:        raw="0.01"   (visto 2 veces)
+    ANTHROPIC_USDT_Perp:  raw="0.005"  (visto 2 veces)
+    ARB_USDT_Perp:        raw="0.01"
+    AMAT_USDT_Perp:       raw="0.013"
+    AMZN_USDT_Perp:       raw="0.0129"
+    AAOI_USDT_Perp:       raw="0.0"    (visto 3 veces)
+    AAPL_USDT_Perp:       raw="0.0"    (visto 2 veces)
+    AI16Z/AMD/ARM_USDT_Perp: raw="0.0"
+
+Con `× CENTIBEEPS_TO_DECIMAL` (1e-6), AAVE (raw=0.01) da una fracción de
+1e-8 → APR ≈0.001%, indistinguible de cero — exactamente lo que se veía en
+el ranking. Pero la magnitud de los valores no-cero (0.005 a 0.013) es
+justo la de un funding rate expresado YA como porcentaje directo del
+periodo de 8h — el mismo patrón que mark_price/open_interest/volumen de
+GRVT, que también vinieron "ya humanos" sin ninguna escala oculta (ver
+abajo). Con `÷ 100` en vez de `× 1e-6`, esos mismos valores dan: AAVE→
+10.95% APR, ADA→10.95%, ARB→10.95%, AMAT→14.235%, AMZN→14.1255%,
+ANTHROPIC→5.475% — cifras de funding normales, ni absurdamente altas ni
+cerca de cero, consistentes entre sí y con lo que se ve en otros exchanges
+para activos similares.
+
+**Fix aplicado**: `funding_rate = float(rate_raw) / 100.0` en vez de
+`× CENTIBEEPS_TO_DECIMAL`. `CENTIBEEPS_TO_DECIMAL` se deja definida pero sin
+uso (mismo criterio que `PRICE_SCALE` más abajo: no perder el nombre por si
+algún día aparece un campo que sí la necesite). El diagnóstico
+`funding_rate_raw`/`funding_rate_calculado` SE MANTIENE activo en el log —
+si esta interpretación también resultara estar mal, hace falta poder verlo
+con el próximo despliegue en vez de descubrirlo a ciegas otra vez. Verificado
+con un test que usa los valores EXACTOS de los tres despliegues de arriba.
+
+--- ESTADO ACTUAL CONFIRMADO (2026-09-18) ---
 
   - `mark_price` / `index_price`: número decimal humano directo, SIN
     escalar. Confirmado con 7 instrumentos reales en producción.
@@ -260,9 +282,10 @@ de abajo para confirmarlo con datos reales antes de tocar la fórmula.
     Confirmado igual que arriba.
   - `buy_volume_24h_q` / `sell_volume_24h_q`: número decimal humano directo
     en USD, SIN escalar — se suman ambos. Confirmado igual que arriba.
-  - `funding_rate_8h_curr` (÷1e6 "centibeeps"): SOSPECHOSO de tener el mismo
-    problema, pero NO confirmado con un valor crudo real todavía — ver nota
-    de arriba. Diagnóstico añadido, pendiente de un despliegue más.
+  - `funding_rate_8h_curr`: número decimal humano directo EXPRESADO COMO
+    PORCENTAJE del periodo de 8h — se divide entre 100 para obtener la
+    fracción, NO se multiplica por `CENTIBEEPS_TO_DECIMAL`. Confirmado con
+    tres despliegues independientes (ver arriba).
   - Intervalo de liquidación (8h) y el nombre del campo de funding rate:
     siguen confirmados de rondas anteriores, sin cambios.
 """
@@ -440,12 +463,15 @@ class GrvtConnector:
                 # el bug de escala de OI/Volumen, se confirmó que
                 # `funding_rate_8h_curr`/`funding_rate_8h_avg` están marcados
                 # DEPRECATED en el esquema actual, y existe un campo nuevo
-                # `funding_rate` ("the current indicative funding rate for the
-                # active interval, expressed in centibeeps" — misma unidad, así
-                # que la conversión ÷CENTIBEEPS_TO_DECIMAL de abajo sigue
-                # aplicando sin cambios). Se prueba el nuevo primero y se cae a
-                # los antiguos por compatibilidad, en vez de esperar a que GRVT
-                # retire el campo deprecated y rompa el conector sin avisar.
+                # `funding_rate` (la documentación dice "expressed in
+                # centibeeps", pero ver "CONFIRMADO y corregido" en el
+                # docstring del módulo: los valores reales en producción no
+                # encajan con esa unidad — encajan con un % humano directo del
+                # periodo de 8h, de ahí la división ÷100.0 de abajo, NO
+                # ×CENTIBEEPS_TO_DECIMAL). Se prueba el nuevo campo primero y
+                # se cae a los antiguos por compatibilidad, en vez de esperar
+                # a que GRVT retire el campo deprecated y rompa el conector
+                # sin avisar.
                 rate_raw = ticker.get(
                     "funding_rate",
                     ticker.get("funding_rate_8h_curr", ticker.get("funding_rate_curr")),
@@ -509,7 +535,7 @@ class GrvtConnector:
                         "sell_volume_24h_q_raw": sell_q_raw,
                         "volume_24h_usd_calculado": volume_24h_usd,
                         "funding_rate_raw": rate_raw,
-                        "funding_rate_calculado": float(rate_raw) * CENTIBEEPS_TO_DECIMAL,
+                        "funding_rate_calculado": float(rate_raw) / 100.0,
                     }
 
                 out.append(
@@ -518,7 +544,7 @@ class GrvtConnector:
                         venue_type=VenueType.DEX,
                         symbol=base,
                         raw_symbol=name,
-                        funding_rate=float(rate_raw) * CENTIBEEPS_TO_DECIMAL,
+                        funding_rate=float(rate_raw) / 100.0,
                         interval_hours=interval_hours,
                         mark_price=mark_price,
                         next_funding_time=None,

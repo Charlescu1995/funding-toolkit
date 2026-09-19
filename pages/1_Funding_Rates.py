@@ -19,12 +19,14 @@ from core.data_service import fetch_normalized_rates, filter_rates
 from core.history import WINDOWS_HOURS, historical_apr_all_windows, init_db
 from core.normalize import NormalizedRate
 from core.opportunities import (
+    LOW_LIQUIDITY_FLOOR_USD,
     apply_oi_map,
     collect_oi_targets,
     compute_opportunities,
     fetch_oi_for_targets,
     has_dead_liquidity,
     has_implausible_price_pair,
+    has_low_liquidity,
 )
 
 # Cuántas oportunidades (de arriba del ranking) se enriquecen con OI Depth
@@ -204,6 +206,7 @@ st.divider()
 # ---------- Tabs: Ranking / Matriz / Histórico ----------
 oi_errors: dict[tuple[str, str], str] = {}  # se rellena en la pestaña Ranking, se enseña en Diagnóstico
 dead_liquidity: list = []  # idem — oportunidades descartadas por OI $0 confirmado (ver has_dead_liquidity)
+low_liquidity: list = []  # idem — descartadas por Cuello de botella OI/Vol < piso (ver has_low_liquidity)
 implausible_pairs: list = []  # idem — descartadas por Price Spread implausible (ver has_implausible_price_pair)
 same_exchange_pairs: list = []  # idem — long y short en el MISMO exchange (investigando, ver README 2026-09-18)
 tab_ranking, tab_matrix, tab_history = st.tabs(["🏆 Ranking", "🔲 Matriz", "📈 Histórico"])
@@ -283,10 +286,31 @@ with tab_ranking:
                 "una operación ejecutable de verdad. Detalle en el diagnóstico de abajo."
             )
 
+        # Ver core/opportunities.py::has_low_liquidity — piso de liquidez
+        # mínima pedido por el usuario tras estudiar el CSV completo del
+        # Ranking (2026-09-19): un Cuello de botella de OI o Volumen 24h
+        # CONFIRMADO por debajo de $1.000 en cualquiera de las dos piernas es
+        # "una trampa" (Spread APR llamativo, pero imposible de operar en
+        # ningún tamaño real) — no solo el caso extremo de $0 exacto que ya
+        # saca has_dead_liquidity de arriba.
+        low_liquidity = [o for o in opportunities if has_low_liquidity(o)]
+        opportunities = [o for o in opportunities if not has_low_liquidity(o)]
+
+        if low_liquidity:
+            symbols_low_liquidity = ", ".join(sorted({o.symbol for o in low_liquidity}))
+            st.caption(
+                f"⚠️ {len(low_liquidity)} oportunidad(es) descartada(s) del ranking por Cuello de "
+                f"botella de OI o Volumen 24h por debajo de ${LOW_LIQUIDITY_FLOOR_USD:,.0f} "
+                f"confirmado en una de las dos piernas ({symbols_low_liquidity}) — casi nadie "
+                "tradeando de verdad ahí, así que no es una operación ejecutable en ningún tamaño "
+                "razonable aunque el Spread APR parezca bueno. Detalle en el diagnóstico de abajo."
+            )
+
         if not opportunities:
             st.info(
                 "Todas las oportunidades del top se descartaron — ver los avisos de arriba (Open "
-                "Interest $0 confirmado y/o Price Spread implausible)."
+                "Interest $0 confirmado, Cuello de botella OI/Vol por debajo del piso de liquidez "
+                "y/o Price Spread implausible)."
             )
 
         df = pd.DataFrame(
@@ -422,6 +446,43 @@ if dead_liquidity:
                 }
                 for o in dead_liquidity
             ]
+        )
+
+if low_liquidity:
+    with st.expander(
+        f"Diagnóstico: {len(low_liquidity)} oportunidad(es) descartada(s) por Cuello de botella de "
+        f"liquidez < ${LOW_LIQUIDITY_FLOOR_USD:,.0f}"
+    ):
+        st.caption(
+            "Ver core/opportunities.py::has_low_liquidity. Se descarta si el Cuello de botella de "
+            f"OI o de Volumen 24h (el menor de las dos piernas) es un valor CONFIRMADO por debajo "
+            f"de ${LOW_LIQUIDITY_FLOOR_USD:,.0f} — no incluye filas donde ese dato simplemente no "
+            "se consultó (eso se enseña como «—» en la tabla, no se descarta). Umbral calibrado "
+            "contra los percentiles del CSV completo del Ranking (ver README): cae entre p5 y p10 "
+            "de ambas distribuciones, así que solo saca el ~5-8% más ilíquido de cada una."
+        )
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Símbolo": o.symbol,
+                        "Long en": o.long_exchange,
+                        "Short en": o.short_exchange,
+                        "Spread APR descartado": f"{o.spread_apr:.1f}%",
+                        "Cuello de botella OI ($)": o.oi_bottleneck_usd,
+                        "Cuello de botella Vol ($)": o.volume_bottleneck_usd,
+                    }
+                    for o in sorted(
+                        low_liquidity,
+                        key=lambda o: min(
+                            v for v in (o.oi_bottleneck_usd, o.volume_bottleneck_usd) if v is not None
+                        ),
+                    )
+                ]
+            ),
+            width="stretch",
+            hide_index=True,
+            height=400,
         )
 
 if same_exchange_pairs:

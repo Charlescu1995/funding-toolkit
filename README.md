@@ -1304,7 +1304,7 @@ con el próximo log de despliegue, sin necesidad de adivinar. Probado con un
 conector falso que devuelve el mismo raw_symbol dos veces: el aviso sale
 exactamente como se espera.
 
-## Investigando (2026-09-18): dónde poner un piso de liquidez mínima
+## Resuelto (2026-09-18 → 2026-09-19): piso de liquidez mínima
 
 Al mismo tiempo que lo de arriba, el usuario planteó que las oportunidades
 con Open Interest o Volumen 24h casi-cero (pero no exactamente $0, que ya
@@ -1324,11 +1324,29 @@ evidente — percentiles de Cuello de botella OI: p5=$1.345, p10=$4.740,
 p20=$10.284, p25=$23.591, p50=$124.803. De Cuello de botella Vol: p5=$288,
 p10=$1.958, p20=$12.152, p25=$18.090, p50=$92.978. El caso más limpio y sin
 ambigüedad es Volumen EXACTAMENTE $0 (5 filas: PYTH, PEOPLE, KLUNC, KFLOKI,
-US500) — sería el mismo patrón que `has_dead_liquidity()` pero aplicado a
-`volume_bottleneck_usd` en vez de a OI. Pendiente de decidir con el usuario
-un piso concreto para el resto (propuesta inicial sobre la mesa: $1.000 en
-OI y/o Volumen del cuello de botella) — no se ha tocado código para esto
-todavía, se está investigando en orden empezando por el bug de arriba.
+US500).
+
+**Decisión del usuario (2026-09-19): piso de $1.000**, aplicado a
+CUALQUIERA de los dos lados (OI o Volumen del cuello de botella) — un
+volumen casi nulo ya es la trampa por sí solo aunque el OI parezca alto,
+sin nadie tradeando de verdad no se puede entrar ni salir de la posición
+sin mover el precio. $1.000 cae entre p5 y p10 de ambas distribuciones, así
+que solo descarta el ~5-8% más ilíquido de cada una — de paso cubre sin
+necesidad de una función aparte el caso de Volumen $0 exacto de arriba (0 <
+1.000).
+
+**Implementado**: `core/opportunities.py::has_low_liquidity()` +
+`LOW_LIQUIDITY_FLOOR_USD = 1000.0`, mismo patrón que
+`has_dead_liquidity()`/`has_implausible_price_pair()` — una función que
+solo pregunta "¿se descarta?", y `pages/1_Funding_Rates.py` filtra Y
+enseña un panel de diagnóstico con las filas descartadas y sus dos
+cuellos de botella, para no tirar datos en silencio. `None` (dato no
+consultado, no confirmado) nunca cuenta como "por debajo del piso" —
+mismo criterio que ya usaba `has_dead_liquidity()`. Test con el caso real
+del CSV (MNT grvt/hyperliquid, OI=$261/Vol=$347 → descartado), el caso de
+Volumen $0 exacto, los bordes del umbral y un caso de liquidez sana de
+control. Pendiente de confirmación en producción con un CSV fresco del
+Ranking tras el redespliegue.
 
 De paso, estudiando el mismo CSV aparecieron dos hallazgos más sin
 investigar todavía:

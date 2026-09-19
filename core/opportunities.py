@@ -308,6 +308,54 @@ def has_implausible_price_pair(opp: OpportunityRow) -> bool:
     return opp.price_spread_pct is not None and opp.price_spread_pct > IMPLAUSIBLE_PRICE_PAIR_PCT
 
 
+# Piso de liquidez mínima (2026-09-19, ver README "Investigando... dónde
+# poner un piso de liquidez mínima"): el usuario, tras estudiar un export
+# CSV completo del Ranking (912 filas), planteó que las oportunidades con
+# Open Interest o Volumen 24h casi-cero (pero no exactamente $0, que ya
+# descarta has_dead_liquidity arriba) son "una trampa" — un Spread APR
+# llamativo que en la práctica no se puede operar en ningún tamaño real,
+# como el ejemplo real que dio el usuario: MNT en grvt(long) vs
+# hyperliquid(short), Spread APR 60.7%, pero Cuello de botella OI = $261 y
+# Cuello de botella Vol = $347.
+#
+# Del mismo CSV, la distribución de ambos "cuello de botella" es continua,
+# sin un salto/hueco natural evidente:
+#   Cuello de botella OI:  p5=$1.345  p10=$4.740  p20=$10.284 p25=$23.591 p50=$124.803
+#   Cuello de botella Vol: p5=$288    p10=$1.958  p20=$12.152 p25=$18.090 p50=$92.978
+# $1.000 cae entre p5 y p10 de las dos — descarta solo el ~5-8% más bajo de
+# cada distribución, no un recorte agresivo, y ya de paso cubre el caso más
+# limpio que había sobre la mesa (Volumen EXACTAMENTE $0: PYTH, PEOPLE,
+# KLUNC, KFLOKI, US500 en ese mismo CSV — con floor=$1.000 caen aquí sin
+# necesidad de una función aparte tipo has_dead_volume()).
+LOW_LIQUIDITY_FLOOR_USD = 1000.0
+
+
+def has_low_liquidity(opp: OpportunityRow, floor_usd: float = LOW_LIQUIDITY_FLOOR_USD) -> bool:
+    """
+    True si el cuello de botella de OI o el de Volumen 24h (el menor de las
+    dos piernas — oi_bottleneck_usd / volume_bottleneck_usd, ya calculados
+    en compute_opportunities()/apply_oi_map()) es un valor CONFIRMADO por
+    debajo de `floor_usd`.
+
+    "Confirmado" es la palabra clave: `None` (todavía no se consultó ese
+    dato — Depth fuera del top N enriquecido, o el exchange no lo trae en
+    el fetch masivo) NO cuenta como "por debajo del piso". Tratar `None`
+    como cero descartaría de golpe la inmensa mayoría del ranking (la
+    mayoría de filas no tienen Depth calculado, se enseñan como "—" en la
+    interfaz) en vez de solo las que de verdad se confirmó que son
+    ilíquidas — mismo criterio que ya usa has_dead_liquidity() de arriba.
+
+    Se descarta si CUALQUIERA de los dos lados (OI o Volumen) cae por
+    debajo del piso, no solo si caen los dos a la vez: un volumen casi nulo
+    ya es la trampa por sí solo aunque el OI parezca alto — sin nadie
+    tradeando de verdad no se puede entrar ni salir de la posición sin
+    mover el precio.
+    """
+    below_oi = opp.oi_bottleneck_usd is not None and opp.oi_bottleneck_usd < floor_usd
+    below_volume = opp.volume_bottleneck_usd is not None and opp.volume_bottleneck_usd < floor_usd
+    return below_oi or below_volume
+
+
 def enrich_oi_depth(opportunities: list[OpportunityRow], top_n: int = 10) -> dict[OiTarget, str]:
     """
     Atajo sin caché: collect + fetch + apply en un solo paso. Pensado para el

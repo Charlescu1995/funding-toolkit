@@ -81,6 +81,7 @@ se usa tal cual, sin repetir la conversión que sí hace falta para holdVol.
 
 from __future__ import annotations
 
+import json
 import logging
 
 import requests
@@ -161,6 +162,13 @@ class MexcConnector:
 
         out: list[FundingRate] = []
         skipped: dict[str, str] = {}
+        # Ver auditoría de bugs (Hallazgo #3, 2026-09-19): mismo guard
+        # defensivo que ya tiene connectors/cex_kucoin.py — un OI negativo
+        # es físicamente imposible, así que no se propaga tal cual, se
+        # descarta a None y se deja el payload crudo para diagnosticar.
+        # Aquí no hay (todavía) ninguna causa raíz confirmada como la de
+        # KuCoin (contratos inversos) — es puramente defensivo.
+        oi_anomaly_samples: dict[str, dict] = {}
 
         for row in funding_rows:
             if not isinstance(row, dict):
@@ -207,6 +215,18 @@ class MexcConnector:
                 except (TypeError, ValueError):
                     open_interest_usd = None
 
+                # Ver Hallazgo #3 de la auditoría: guard defensivo, mismo
+                # patrón que cex_kucoin.py — un OI negativo no se propaga.
+                if open_interest_usd is not None and open_interest_usd < 0:
+                    oi_anomaly_samples[symbol] = {
+                        "holdVol_raw": hold_vol_raw,
+                        "contractSize": contract_size,
+                        "fairPrice_raw": mark_price_raw,
+                        "mark_price_calculado": mark_price,
+                        "open_interest_usd_calculado_DESCARTADO": open_interest_usd,
+                    }
+                    open_interest_usd = None
+
             volume_24h_raw = volume_24h_by_symbol.get(symbol)
             volume_24h_usd = None
             if volume_24h_raw is not None:
@@ -244,6 +264,16 @@ class MexcConnector:
                 len(skipped),
                 len(funding_rows),
                 skipped,
+            )
+
+        if oi_anomaly_samples:
+            logger.warning(
+                "mexc DIAGNÓSTICO OI negativo (%d contrato(s) — guard defensivo del Hallazgo #3 "
+                "de la auditoría, sin causa raíz confirmada todavía a diferencia de KuCoin/SOL; "
+                "se descartó a None en vez de propagarse; payload crudo de los tres factores "
+                "para investigarla): %s",
+                len(oi_anomaly_samples),
+                json.dumps(oi_anomaly_samples, default=str)[:4000],
             )
 
         return out

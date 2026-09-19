@@ -1525,6 +1525,40 @@ investigar todavía:
     completo del Ranking tras el redespliegue, para confirmar que ya no
     quedan las 47 filas en "+0.0%".
 
+## Resuelto (2026-09-19): guard de OI negativo en MEXC y HTX (auditoría de bugs #3)
+
+La auditoría completa (`AUDITORIA_BUGS_2026-09-19.md`, Hallazgo #3) señaló
+que `cex_mexc.py` y `cex_htx.py` calculan Open Interest en USD igual que
+`cex_kucoin.py` (`holdVol × contractSize × fairPrice` en MEXC; `value`
+directo en HTX) pero, a diferencia de KuCoin, **no tenían ninguna guardia
+si ese cálculo daba negativo** — un valor físicamente imposible se habría
+propagado tal cual al Ranking, en vez de descartarse a `None` como ya pasa
+en KuCoin desde el bug real de SOLUSDM.
+
+**Diferencia importante con el fix de KuCoin**: aquí NO hay ninguna causa
+raíz confirmada con datos de producción (no se ha visto todavía OI
+negativo real en MEXC ni HTX) — es un guard puramente defensivo, igual que
+la "guardia de respaldo" que ya tenía KuCoin para causas no confirmadas.
+No se excluye ningún tipo de contrato (no hay evidencia de que MEXC/HTX
+tengan un equivalente a los contratos inversos de KuCoin) — solo se evita
+que un cálculo negativo, si algún día aparece, se cuele en el Ranking.
+
+**Fix**: mismo patrón exacto que la guardia de respaldo de
+`cex_kucoin.py` — si `open_interest_usd` calculado sale negativo, se
+descarta a `None` (nunca se propaga) y se deja un `logger.warning` con el
+payload crudo de los factores usados (en MEXC: `holdVol`, `contractSize`,
+`fairPrice`; en HTX: `value`, ya que ahí no hay cálculo propio) para poder
+investigar la causa si algún día se dispara. Aplicado en `cex_mexc.py`
+justo después de calcular `open_interest_usd` y en `cex_htx.py` justo
+después de leer `value`.
+
+**Verificado** con un test nuevo (`test_mexc_htx_negative_oi_guard.py`,
+datos sintéticos ya que no hay evidencia real de este caso todavía): el
+caso normal (OI positivo) no se ve afectado en ninguno de los dos
+conectores, y un OI negativo sintético (precio/valor anómalo) se descarta
+a `None` y queda registrado en el log en ambos. 22/22 tests pasan en el
+conjunto completo del proyecto tras este cambio, sin regresiones.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

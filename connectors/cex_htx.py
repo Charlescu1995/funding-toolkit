@@ -95,6 +95,7 @@ llamada de red adicional.
 
 from __future__ import annotations
 
+import json
 import logging
 
 import requests
@@ -191,6 +192,15 @@ class HtxConnector:
 
         out: list[FundingRate] = []
         skipped: dict[str, str] = {}
+        # Ver auditoría de bugs (Hallazgo #3, 2026-09-19): mismo guard
+        # defensivo que ya tiene connectors/cex_kucoin.py — un OI negativo
+        # es físicamente imposible, así que no se propaga tal cual, se
+        # descarta a None y se deja el payload crudo para diagnosticar.
+        # Aquí "value" ya viene en USD directo de la API (sin cálculo
+        # propio, a diferencia de KuCoin/MEXC), así que no hay una causa
+        # raíz análoga a los contratos inversos de KuCoin que investigar
+        # de entrada — es puramente defensivo.
+        oi_anomaly_samples: dict[str, dict] = {}
 
         for row in funding_rows:
             if not isinstance(row, dict):
@@ -231,6 +241,15 @@ class HtxConnector:
                 except (TypeError, ValueError):
                     open_interest_usd = None
 
+                # Ver Hallazgo #3 de la auditoría: guard defensivo, mismo
+                # patrón que cex_kucoin.py — un OI negativo no se propaga.
+                if open_interest_usd is not None and open_interest_usd < 0:
+                    oi_anomaly_samples[code] = {
+                        "value_raw": oi_usd_raw,
+                        "open_interest_usd_calculado_DESCARTADO": open_interest_usd,
+                    }
+                    open_interest_usd = None
+
             turnover_raw = turnover_by_code.get(code)
             volume_24h_usd = None
             if turnover_raw is not None:
@@ -267,6 +286,15 @@ class HtxConnector:
                 len(skipped),
                 len(funding_rows),
                 skipped,
+            )
+
+        if oi_anomaly_samples:
+            logger.warning(
+                "htx DIAGNÓSTICO OI negativo (%d contrato(s) — guard defensivo del Hallazgo #3 "
+                "de la auditoría, sin causa raíz confirmada todavía a diferencia de KuCoin/SOL; "
+                "se descartó a None en vez de propagarse; payload crudo para investigarla): %s",
+                len(oi_anomaly_samples),
+                json.dumps(oi_anomaly_samples, default=str)[:4000],
             )
 
         return out

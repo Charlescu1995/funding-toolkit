@@ -184,6 +184,8 @@ class BackpackConnector:
 
         out: list[FundingRate] = []
         skipped: dict[str, str] = {}
+        # Ver Hallazgo #13 de la auditoría (2026-09-19, severidad baja).
+        zero_mark_price_samples: dict[str, object] = {}
 
         for symbol, market in perp_markets.items():
             # Ver docstring: se descarta cualquier mercado que no esté con el
@@ -221,6 +223,14 @@ class BackpackConnector:
                     mark_price = float(mark_price_raw)
                 except (TypeError, ValueError):
                     mark_price = None
+                else:
+                    # Ver Hallazgo #13 de la auditoría (2026-09-19,
+                    # severidad baja): un markPrice de 0 no se propaga
+                    # (daría open_interest_usd=0.0 en silencio), mismo
+                    # criterio que cex_kucoin.py/cex_mexc.py.
+                    if mark_price == 0:
+                        zero_mark_price_samples[symbol] = mark_price_raw
+                        mark_price = None
 
             oi_base_raw = oi_by_symbol.get(symbol)
             open_interest_usd = None
@@ -269,6 +279,14 @@ class BackpackConnector:
                 len(skipped),
                 len(perp_markets),
                 skipped,
+            )
+
+        if zero_mark_price_samples:
+            logger.warning(
+                "backpack DIAGNÓSTICO markPrice == 0 (Hallazgo #13 de la auditoría, 2026-09-19): "
+                "%d símbolo(s) con markPrice explícito de 0 -- no se calculó open_interest_usd: %s",
+                len(zero_mark_price_samples),
+                zero_mark_price_samples,
             )
 
         return out

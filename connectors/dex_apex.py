@@ -230,6 +230,8 @@ class ApexConnector:
         out: list[FundingRate] = []
         errors: dict[str, str] = {}
         no_ticker = 0
+        # Ver Hallazgo #13 de la auditoría (2026-09-19, severidad baja).
+        zero_mark_price_samples: dict[str, object] = {}
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             future_to_symbol = {
@@ -269,6 +271,10 @@ class ApexConnector:
                         mark_price = float(mark_price_raw)
                     except (TypeError, ValueError):
                         mark_price = None
+                    else:
+                        if mark_price == 0:
+                            zero_mark_price_samples[market_symbol] = mark_price_raw
+                            mark_price = None
 
                 open_interest_usd = None
                 if oi_raw is not None and mark_price is not None:
@@ -332,6 +338,14 @@ class ApexConnector:
                 len(market_symbols),
                 no_ticker,
                 errors,
+            )
+
+        if zero_mark_price_samples:
+            logger.warning(
+                "apex DIAGNÓSTICO markPrice == 0 (Hallazgo #13 de la auditoría, 2026-09-19): "
+                "%d símbolo(s) con markPrice explícito de 0 -- no se calculó open_interest_usd: %s",
+                len(zero_mark_price_samples),
+                zero_mark_price_samples,
             )
 
         return out

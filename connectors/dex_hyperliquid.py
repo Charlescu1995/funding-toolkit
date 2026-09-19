@@ -64,6 +64,11 @@ class HyperliquidConnector:
 
         universe = meta.get("universe", [])
         out: list[FundingRate] = []
+        # Ver Hallazgo #13 de la auditoría (2026-09-19, severidad baja):
+        # mismo guard defensivo que cex_kucoin.py/cex_mexc.py -- un
+        # markPx de 0 explícito no se multiplica (daría oi_usd=0.0 en
+        # silencio), se descarta y se guarda una muestra de diagnóstico.
+        zero_mark_price_samples: dict[str, object] = {}
 
         for asset, ctx in zip(universe, asset_ctxs):
             symbol = asset.get("name")
@@ -76,9 +81,16 @@ class HyperliquidConnector:
             oi_usd = None
             if open_interest is not None and mark_price is not None:
                 try:
-                    oi_usd = float(open_interest) * float(mark_price)
+                    mark_price_val = float(mark_price)
                 except (TypeError, ValueError):
-                    oi_usd = None
+                    mark_price_val = None
+                if mark_price_val == 0:
+                    zero_mark_price_samples[symbol] = mark_price
+                elif mark_price_val is not None:
+                    try:
+                        oi_usd = float(open_interest) * mark_price_val
+                    except (TypeError, ValueError):
+                        oi_usd = None
 
             # Ver docstring: dayNtlVlm ya viene en USD, sin conversión.
             day_ntl_vlm = ctx.get("dayNtlVlm")
@@ -102,6 +114,15 @@ class HyperliquidConnector:
                     open_interest_usd=oi_usd,
                     volume_24h_usd=volume_24h_usd,
                 )
+            )
+
+        if zero_mark_price_samples:
+            logger.warning(
+                "hyperliquid DIAGNÓSTICO markPx == 0 (Hallazgo #13 de la auditoría, 2026-09-19): "
+                "%d símbolo(s) con markPx explícito de 0 -- no se calculó open_interest_usd "
+                "(habría dado 0.0 en silencio): %s",
+                len(zero_mark_price_samples),
+                zero_mark_price_samples,
             )
 
         return out

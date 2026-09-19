@@ -485,6 +485,10 @@ class GrvtConnector:
         # se descartan en vez de aplicarles el /100 a ciegas, y se guardan
         # aquí para poder confirmar su unidad real el día que aparezcan.
         unconfirmed_rate_field_samples: dict[str, object] = {}
+        # Ver Hallazgo #13 de la auditoría (2026-09-19, severidad baja):
+        # mismo guard defensivo que cex_kucoin.py/cex_mexc.py -- un
+        # mark_price de 0 no se propaga (daría oi_usd=0.0 en silencio).
+        zero_mark_price_samples: dict[str, object] = {}
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             future_to_name = {
@@ -569,7 +573,16 @@ class GrvtConnector:
                 # de este mismo bug estaban aplicando un divisor que no hacía
                 # falta).
                 mark_price_raw = ticker.get("mark_price")
-                mark_price = float(mark_price_raw) if mark_price_raw is not None else None
+                mark_price = None
+                if mark_price_raw is not None:
+                    try:
+                        mark_price = float(mark_price_raw)
+                    except (TypeError, ValueError):
+                        mark_price = None
+                    else:
+                        if mark_price == 0:
+                            zero_mark_price_samples[name] = mark_price_raw
+                            mark_price = None
 
                 oi_raw = ticker.get("open_interest")
                 oi_usd = None
@@ -648,6 +661,15 @@ class GrvtConnector:
                 "valores crudos: %s",
                 len(unconfirmed_rate_field_samples),
                 json.dumps(unconfirmed_rate_field_samples, default=str)[:4000],
+            )
+
+        if zero_mark_price_samples:
+            logger.warning(
+                "grvt DIAGNÓSTICO mark_price == 0 (Hallazgo #13 de la auditoría, 2026-09-19): "
+                "%d instrumento(s) con mark_price explícito de 0 -- no se calculó "
+                "open_interest_usd: %s",
+                len(zero_mark_price_samples),
+                json.dumps(zero_mark_price_samples, default=str)[:4000],
             )
 
         if not out:

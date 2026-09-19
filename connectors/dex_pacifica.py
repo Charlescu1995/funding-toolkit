@@ -63,6 +63,8 @@ class PacificaConnector:
         rows = payload.get("data", [])
 
         out: list[FundingRate] = []
+        # Ver Hallazgo #13 de la auditoría (2026-09-19, severidad baja).
+        zero_mark_price_samples: dict[str, object] = {}
         for row in rows:
             symbol = row.get("symbol")
             rate = row.get("funding")
@@ -70,7 +72,16 @@ class PacificaConnector:
                 continue
 
             mark_price_raw = row.get("mark")
-            mark_price = float(mark_price_raw) if mark_price_raw is not None else None
+            mark_price = None
+            if mark_price_raw is not None:
+                try:
+                    mark_price = float(mark_price_raw)
+                except (TypeError, ValueError):
+                    mark_price = None
+                else:
+                    if mark_price == 0:
+                        zero_mark_price_samples[symbol] = mark_price_raw
+                        mark_price = None
 
             open_interest_raw = row.get("open_interest")
             oi_usd = None
@@ -102,6 +113,14 @@ class PacificaConnector:
                     open_interest_usd=oi_usd,
                     volume_24h_usd=volume_24h_usd,
                 )
+            )
+
+        if zero_mark_price_samples:
+            logger.warning(
+                "pacifica DIAGNÓSTICO mark == 0 (Hallazgo #13 de la auditoría, 2026-09-19): "
+                "%d símbolo(s) con mark explícito de 0 -- no se calculó open_interest_usd: %s",
+                len(zero_mark_price_samples),
+                zero_mark_price_samples,
             )
 
         return out

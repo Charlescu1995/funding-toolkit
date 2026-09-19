@@ -164,6 +164,10 @@ class LighterConnector:
 
         # market_id -> (mark_price, open_interest en unidades base, volumen 24h en USD)
         depth_by_market: dict[int, tuple[float | None, float | None, float | None]] = {}
+        # Ver Hallazgo #13 de la auditoría (2026-09-19, severidad baja):
+        # mismo guard defensivo que el resto de conectores -- un mark_price
+        # de 0 no se propaga (daría oi_usd=0.0 en silencio).
+        zero_mark_price_samples: dict[str, object] = {}
         # Ver docstring, "Nota sobre status" (Hallazgo #6 de la auditoría,
         # 2026-09-19): mercados marcados status != "active" se excluyen del
         # todo más abajo, no solo se dejan sin profundidad.
@@ -179,7 +183,16 @@ class LighterConnector:
                 continue
 
             mark_price_raw = row.get("mark_price")
-            mark_price = float(mark_price_raw) if mark_price_raw is not None else None
+            mark_price = None
+            if mark_price_raw is not None:
+                try:
+                    mark_price = float(mark_price_raw)
+                except (TypeError, ValueError):
+                    mark_price = None
+                else:
+                    if mark_price == 0:
+                        zero_mark_price_samples[row.get("symbol") or str(market_id)] = mark_price_raw
+                        mark_price = None
             open_interest = row.get("open_interest")
             # Ver docstring: daily_quote_token_volume ya viene en USD, sin conversión.
             volume_24h_raw = row.get("daily_quote_token_volume")
@@ -264,6 +277,14 @@ class LighterConnector:
                 "ver docstring del módulo): %s",
                 len(inactive_excluded),
                 sorted(inactive_excluded),
+            )
+
+        if zero_mark_price_samples:
+            logger.warning(
+                "lighter DIAGNÓSTICO mark_price == 0 (Hallazgo #13 de la auditoría, 2026-09-19): "
+                "%d mercado(s) con mark_price explícito de 0 -- no se calculó open_interest_usd: %s",
+                len(zero_mark_price_samples),
+                zero_mark_price_samples,
             )
 
         return out

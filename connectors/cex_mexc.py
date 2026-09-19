@@ -159,6 +159,16 @@ amount24 — ambos lados dan ≈$4.25-4.27B, la pequeña diferencia es normal
 porque el precio se mueve entre el cálculo de cada campo en el propio
 exchange). `amount24` ya es el turnover de 24h en USD directamente, así que
 se usa tal cual, sin repetir la conversión que sí hace falta para holdVol.
+
+--- Nota sobre `fairPrice == 0` (RESUELTO 2026-09-19, auditoría de bugs,
+    Hallazgo #13 — severidad baja, mismo fix que cex_kucoin.py) ---
+
+`open_interest_usd = holdVol * contractSize * fairPrice` solo comprobaba
+`mark_price is not None`. Un `fairPrice: 0` explícito habría pasado ese
+chequeo igual y dado `open_interest_usd = 0.0` -- un contrato operable
+mostrado como si tuviera profundidad cero. Se descarta igual que un
+fairPrice ausente (mark_price a None, no se calcula OI) y se registra una
+muestra de diagnóstico. Guardia defensiva, nunca observada en vivo.
 """
 
 from __future__ import annotations
@@ -335,6 +345,9 @@ class MexcConnector:
         # Aquí no hay (todavía) ninguna causa raíz confirmada como la de
         # KuCoin (contratos inversos) — es puramente defensivo.
         oi_anomaly_samples: dict[str, dict] = {}
+        # Ver Hallazgo #13 de la auditoría (2026-09-19, severidad baja):
+        # mismo criterio que zero_mark_price_samples de cex_kucoin.py.
+        zero_mark_price_samples: dict[str, float] = {}
 
         for row in funding_rows:
             if not isinstance(row, dict):
@@ -371,6 +384,15 @@ class MexcConnector:
                     mark_price = float(mark_price_raw)
                 except (TypeError, ValueError):
                     mark_price = None
+                else:
+                    # Ver Hallazgo #13 de la auditoría (2026-09-19): un
+                    # fairPrice de 0 no es plausible para un contrato
+                    # operable -- se descarta igual que si no hubiera
+                    # venido, en vez de dejar que open_interest_usd salga
+                    # 0.0 en silencio (mismo criterio que cex_kucoin.py).
+                    if mark_price == 0:
+                        zero_mark_price_samples[symbol] = mark_price_raw
+                        mark_price = None
 
             hold_vol_raw = hold_vol_by_symbol.get(symbol)
             open_interest_usd = None
@@ -440,6 +462,15 @@ class MexcConnector:
                 "para investigarla): %s",
                 len(oi_anomaly_samples),
                 json.dumps(oi_anomaly_samples, default=str)[:4000],
+            )
+
+        if zero_mark_price_samples:
+            logger.warning(
+                "mexc DIAGNÓSTICO fairPrice == 0 (Hallazgo #13 de la auditoría, 2026-09-19): "
+                "%d contrato(s) con fairPrice explícito de 0 -- se descartó a None en vez de "
+                "dejar que open_interest_usd saliera 0.0 en silencio: %s",
+                len(zero_mark_price_samples),
+                zero_mark_price_samples,
             )
 
         return out

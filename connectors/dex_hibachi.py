@@ -169,6 +169,8 @@ class HibachiConnector:
 
         out: list[FundingRate] = []
         skipped: dict[str, str] = {}
+        # Ver Hallazgo #13 de la auditoría (2026-09-19, severidad baja).
+        zero_mark_price_samples: dict[str, object] = {}
 
         for row in markets:
             if not isinstance(row, dict):
@@ -207,6 +209,12 @@ class HibachiConnector:
                     mark_price = float(mark_price_raw)
                 except (TypeError, ValueError):
                     mark_price = None
+                else:
+                    # Ver Hallazgo #13 de la auditoría (2026-09-19,
+                    # severidad baja): un markPrice de 0 no se propaga.
+                    if mark_price == 0:
+                        zero_mark_price_samples[raw_symbol] = mark_price_raw
+                        mark_price = None
 
             oi_base_raw = info.get("openInterestQuantity")
             open_interest_usd = None
@@ -245,6 +253,14 @@ class HibachiConnector:
                 len(skipped),
                 len(markets),
                 skipped,
+            )
+
+        if zero_mark_price_samples:
+            logger.warning(
+                "hibachi DIAGNÓSTICO markPrice == 0 (Hallazgo #13 de la auditoría, 2026-09-19): "
+                "%d símbolo(s) con markPrice explícito de 0 -- no se calculó open_interest_usd: %s",
+                len(zero_mark_price_samples),
+                zero_mark_price_samples,
             )
 
         return out

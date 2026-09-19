@@ -129,6 +129,36 @@ resta sin poder contrastarla. Si Vertex se vuelve alcanzable desde este
 entorno en el futuro, el primer paso sería probar ese diff de dos snapshots
 contra un producto conocido y contrastarlo con el volumen que muestra la UI
 pública de Vertex.
+
+--- Nota sobre Hallazgo #15 de la auditoría (2026-09-19) — diagnóstico
+    añadido, ninguna fórmula cambiada ---
+
+La auditoría concretó lo que ya se sabía: tanto el ÷1e18 de `funding_rate`
+como la suposición "`open_interests` ya viene en USD" (ver las dos notas de
+arriba) dependen enteramente de la documentación oficial, sin ningún dato
+en vivo — este conector nunca se ha podido alcanzar desde ningún entorno de
+desarrollo de este proyecto (ver "NO se ha podido verificar contra la API
+en vivo" al principio del docstring), a diferencia de MEXC/Paradex/KuCoin,
+donde al menos algo se pudo contrastar con WebFetch aunque fuera parcial.
+Investigado de nuevo en esta ronda (WebSearch + `coinalyze.net`): no
+apareció ningún valor numérico real nuevo, solo confirmación indirecta de
+que las tasas de Vertex "se normalizan a 8h" y son fracciones pequeñas de
+porcentaje — coherente con lo que ya asume el código, pero no una cifra
+concreta que contraste el ÷1e18. La página de GitBook con el detalle del
+campo (`vertex-protocol.gitbook.io/docs/basics/funding-rates`) no se pudo
+leer, bloqueada por el sandbox.
+
+No se cambia ninguna fórmula sin evidencia nueva (mismo criterio de
+siempre). Se añade en su lugar un log de diagnóstico
+(`vertex DIAGNÓSTICO escala funding_rate/open_interest`) con los primeros
+valores crudos y ya convertidos de cada ciclo, para poder contrastarlos en
+cuanto llegue el primer log real de producción.
+
+Nota práctica: en los últimos despliegues aparecía "vertex SSL" como error
+conocido en los logs — si esta conexión no está llegando a completarse en
+producción todavía, este diagnóstico no producirá ningún dato hasta que
+ese problema de conectividad se resuelva primero; la confirmación de la
+escala está bloqueada detrás de eso, no solo de la falta de evidencia.
 """
 
 from __future__ import annotations
@@ -271,6 +301,13 @@ class VertexConnector:
 
         out: list[FundingRate] = []
         skipped: dict[str, str] = {}
+        # Ver docstring, "Nota sobre la escala de funding_rate" y "Nota
+        # sobre open_interest" (Hallazgo #15 de la auditoría, 2026-09-19 --
+        # SOSPECHOSO, sin verificar en vivo, conector nunca alcanzable
+        # desde este sandbox): muestra de los primeros valores crudos y ya
+        # convertidos, para poder confirmar/descartar el ÷1e18 y la
+        # suposición de "open_interests ya en USD" con el próximo log real.
+        scale_diagnostic_samples: dict[str, dict] = {}
 
         for pid, symbol in perp_by_id.items():
             rate_raw = funding_rates_raw.get(str(pid))
@@ -294,6 +331,15 @@ class VertexConnector:
                     open_interest_usd = None
 
             base_symbol = symbol[: -len(PERP_SUFFIX)] if symbol.endswith(PERP_SUFFIX) else symbol
+
+            if len(scale_diagnostic_samples) < 15:
+                scale_diagnostic_samples[symbol] = {
+                    "funding_rate_raw_x18": rate_raw,
+                    "funding_rate_calculado": rate,
+                    "open_interest_raw_x18": oi_raw,
+                    "open_interest_usd_calculado": open_interest_usd,
+                    "mark_price_oracle": mark_price_by_id.get(pid),
+                }
 
             out.append(
                 FundingRate(
@@ -325,6 +371,20 @@ class VertexConnector:
                 len(skipped),
                 len(perp_by_id),
                 skipped,
+            )
+
+        if scale_diagnostic_samples:
+            logger.info(
+                "vertex DIAGNÓSTICO escala funding_rate/open_interest (Hallazgo #15 de la "
+                "auditoría, 2026-09-19 -- SOSPECHOSO, ver docstring del módulo, la asunción "
+                "menos confirmada de este conector): muestra de %d producto(s) este ciclo, "
+                "crudo y calculado, para contrastar contra valores esperados (funding típico "
+                "fracciones de 0.01%%-0.05%% por hora; OI de un mercado mediano del orden de "
+                "$1M-$10M, no billones ni céntimos -- si sale muy desproporcionado, revisar "
+                "primero si open_interests necesita multiplicarse por oracle_price_x18 en vez "
+                "de usarse directo, ver docstring): %s",
+                len(scale_diagnostic_samples),
+                scale_diagnostic_samples,
             )
 
         return out

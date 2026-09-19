@@ -40,6 +40,41 @@ por debajo o muy por encima de lo esperado), es la primera sospecha a
 revisar, igual que con OI:
 
     volume_24h_usd = float(volume_24h) * mark_price
+
+--- Nota sobre la escala de `funding_rate` -- SOSPECHOSO, sin verificar en
+    vivo (Hallazgo #14 de la auditoría, 2026-09-19) ---
+
+A diferencia de OI y volumen (arriba), `funding_rate` se usa tal cual
+(`float(rate)`, sin ningún escalado) sin que se haya citado nunca un valor
+real confirmado para contrastar. Investigado en esta ronda:
+
+  - `docs.paradex.trade/risk/funding-mechanism` (la página que explica el
+    MECANISMO, no el endpoint) trae un ejemplo trabajado con Raw Rate =
+    0.0003 = 0.03% por periodo de 8h -- decimal sin escalar, coincide con
+    lo que hace el código ahora mismo.
+  - Pero la página de referencia del propio endpoint
+    (`/api/prod/markets/get-markets-summary`) describe el campo como
+    "Current funding rate **percentage**", y su ejemplo de respuesta trae
+    `"funding_rate": "0.3"` -- el MISMO objeto BTC-USD-PERP citado arriba
+    para volume_24h/mark_price. Ojo: ese ejemplo tiene toda la pinta de ser
+    un placeholder autogenerado del esquema OpenAPI, no una captura real —
+    `ask_iv`, `delta`, `gamma`, `theta`, `risk_free_rate` y varios más
+    vienen todos con números redondos poco creíbles como "0.2", "0.05" o
+    "1". Esto no solo deja sin confirmar la escala de `funding_rate`: también
+    debilita la confianza en el propio ejemplo que se usó arriba para
+    razonar sobre `volume_24h`/`open_interest` -- puede que tampoco sea un
+    dato real.
+  - Se intentó llamar en vivo a `api.prod.paradex.trade/v1/markets/summary`
+    con WebFetch para sacar un valor real de contraste: esta vez el propio
+    sandbox bloqueó la petición pidiendo una aprobación que no llegó a
+    tiempo (modo de fallo distinto al truncamiento de arrays ya conocido
+    con MEXC/KuCoin, pero mismo resultado práctico: sin dato en vivo).
+
+No se aplicó ningún factor de escala sin poder confirmarlo (mismo criterio
+de siempre: mejor no tocar que adivinar). En su lugar, `fetch_funding_rates()`
+deja un log de diagnóstico (`paradex DIAGNÓSTICO escala de funding_rate`)
+con los primeros valores crudos de cada ciclo, para poder contrastar la
+magnitud real contra lo esperado en el próximo log de producción.
 """
 
 from __future__ import annotations
@@ -78,6 +113,13 @@ class ParadexConnector:
         rows = payload.get("results", [])
 
         out: list[FundingRate] = []
+        # Ver Hallazgo #13 de la auditoría (2026-09-19, severidad baja).
+        zero_mark_price_samples: dict[str, object] = {}
+        # Ver docstring, "Nota sobre la escala de funding_rate SIN
+        # verificar (Hallazgo #14 de la auditoría, 2026-09-19)": muestra de
+        # los primeros valores crudos vistos, para poder confirmar/
+        # descartar la escala con el próximo log real de producción.
+        funding_rate_samples: dict[str, object] = {}
         for row in rows:
             raw_symbol = row.get("symbol")  # ej. "BTC-USD-PERP"
             rate = row.get("funding_rate")
@@ -91,8 +133,26 @@ class ParadexConnector:
                 continue
             symbol = raw_symbol.split("-")[0]
 
+            if len(funding_rate_samples) < 15:
+                funding_rate_samples[raw_symbol] = {
+                    "funding_rate_raw": rate,
+                    "mark_price_raw": row.get("mark_price"),
+                }
+
             mark_price_raw = row.get("mark_price")
-            mark_price = float(mark_price_raw) if mark_price_raw is not None else None
+            mark_price = None
+            if mark_price_raw is not None:
+                try:
+                    mark_price = float(mark_price_raw)
+                except (TypeError, ValueError):
+                    mark_price = None
+                else:
+                    # Ver Hallazgo #13 de la auditoría (2026-09-19,
+                    # severidad baja): un mark_price de 0 no se propaga
+                    # (daría oi_usd/volume_24h_usd = 0.0 en silencio).
+                    if mark_price == 0:
+                        zero_mark_price_samples[raw_symbol] = mark_price_raw
+                        mark_price = None
 
             open_interest_raw = row.get("open_interest")
             oi_usd = None
@@ -125,6 +185,27 @@ class ParadexConnector:
                     open_interest_usd=oi_usd,
                     volume_24h_usd=volume_24h_usd,
                 )
+            )
+
+        if zero_mark_price_samples:
+            logger.warning(
+                "paradex DIAGNÓSTICO mark_price == 0 (Hallazgo #13 de la auditoría, 2026-09-19): "
+                "%d símbolo(s) con mark_price explícito de 0 -- no se calculó "
+                "open_interest_usd/volume_24h_usd: %s",
+                len(zero_mark_price_samples),
+                zero_mark_price_samples,
+            )
+
+        if funding_rate_samples:
+            logger.info(
+                "paradex DIAGNÓSTICO escala de funding_rate (Hallazgo #14 de la auditoría, "
+                "2026-09-19 -- SOSPECHOSO, sin verificar en vivo, ver docstring del módulo): "
+                "muestra de los primeros %d valores crudos recibidos este ciclo, para "
+                "contrastar magnitud contra lo esperado (un funding típico ronda fracciones "
+                "de 0.01%%-0.05%% por periodo de 8h -- si estos valores salen ~100x más "
+                "grandes o más pequeños, la escala asumida en el código es incorrecta): %s",
+                len(funding_rate_samples),
+                funding_rate_samples,
             )
 
         return out

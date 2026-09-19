@@ -1979,6 +1979,76 @@ fix habrían colisionado de verdad en el símbolo normalizado (`"BTC"`,
 `"ETH"`, etc.) con su hermano linear — el hallazgo pasa de SOSPECHOSO a
 CONFIRMADO con evidencia real, no solo de documentación.
 
+## Resuelto (2026-09-19): Hallazgos #13, #14 y #15 de la auditoría — `mark_price == 0` sin guardar, y dos diagnósticos de escala sin confirmar (Paradex, Vertex)
+
+Los tres se estudiaron juntos antes de tocar código (petición explícita del
+usuario: "Estudia el 13, 14 y 15"), y se implementaron los tres juntos tras
+su aprobación ("vamos a hacer las 3").
+
+**Hallazgo #13 (severidad baja, CONFIRMADO como gap real de código, aunque
+nunca observado en vivo)**: el cálculo `open_interest_usd = X * mark_price`
+en todos los conectores solo comprobaba `mark_price is not None`, nunca
+`!= 0`. Un mark price explícito de 0 (en vez de campo ausente) pasaba ese
+chequeo igual y producía `open_interest_usd = 0.0` — un mercado real
+mostrado como si tuviera profundidad cero, indistinguible de un error real.
+
+La auditoría citó 3 archivos (`cex_kucoin.py:261-266`, `cex_mexc.py:203-208`,
+`cex_ccxt.py:233-244`), pero al estudiarlo se encontró que:
+- La cita de `cex_ccxt.py:233-244` no es el sitio correcto — esas líneas son
+  el fix de los Hallazgos #4/#5 (`next_funding_time`/`interval`). El hueco
+  real está en `fetch_open_interest_usd()` (el fallback
+  `openInterestAmount × mark_price` para exchanges como bitget).
+- El mismo hueco exacto existía, sin excepción, en **9 conectores DEX** más:
+  hyperliquid, backpack, apex, paradex, hibachi, risex, grvt, pacifica y
+  lighter. El usuario decidió arreglar los 12 archivos, no solo los 3
+  citados.
+
+**Fix**: se trata `mark_price == 0` igual que un mark price ausente (se
+descarta a `None`, no se calcula OI ni se publica un precio de 0) y se
+registra una muestra de diagnóstico por conector, mismo criterio que la
+guardia de OI negativo del Hallazgo #3. En `cex_ccxt.py`, al no tener el
+mismo patrón de "muestra acumulada" que el resto, se reporta como un error
+explícito por símbolo en vez de un valor `0.0` silencioso.
+
+**Hallazgo #14 (SOSPECHOSO, sigue sin confirmar)**: la escala de
+`funding_rate` en Paradex nunca se verificó contra un valor real —
+`dex_paradex.py` usa el campo crudo tal cual, sin ningún escalado. Se
+investigó en profundidad: la página de mecanismo de funding de Paradex trae
+un ejemplo trabajado (0.0003 = 0.03% por 8h, decimal sin escalar, coincide
+con el código actual), pero la página de referencia del endpoint describe
+el campo como "funding rate **percentage**" con un ejemplo `"0.3"` que
+tiene toda la pinta de ser un placeholder autogenerado del esquema OpenAPI
+(varios campos vecinos en ese mismo ejemplo son números redondos poco
+creíbles). Un intento de llamar en vivo a `api.prod.paradex.trade` lo
+bloqueó el propio sandbox pidiendo una aprobación que no llegó a tiempo. Sin
+poder confirmar ninguna de las dos lecturas, **no se aplicó ningún factor de
+escala** (mismo criterio de siempre: mejor no tocar que adivinar). Se añadió
+en su lugar un log de diagnóstico (`paradex DIAGNÓSTICO escala de
+funding_rate`) con los primeros valores crudos de cada ciclo, para
+confirmar la escala real con el próximo log de producción.
+
+**Hallazgo #15 (SOSPECHOSO, sigue sin confirmar — ya sabíamos que Vertex es
+el conector menos confirmado; esto lo concreta)**: tanto el ÷1e18 de
+`funding_rate` como la suposición "`open_interests` ya viene en USD" en
+`dex_vertex.py` dependen enteramente de la documentación oficial, sin
+ningún dato en vivo — este conector nunca se ha podido alcanzar desde
+ningún entorno de desarrollo de este proyecto. La investigación de esta
+ronda (WebSearch + coinalyze.net) no aportó ningún valor numérico real
+nuevo. Igual que con Paradex, no se cambió ninguna fórmula sin evidencia;
+se añadió un log de diagnóstico (`vertex DIAGNÓSTICO escala
+funding_rate/open_interest`) con los primeros valores crudos y ya
+convertidos de cada ciclo. Nota práctica: si los últimos despliegues
+muestran "vertex SSL" como error conocido, este diagnóstico no producirá
+ningún dato hasta que esa conectividad se resuelva primero.
+
+**Verificado** con tests nuevos: `test_finding_13_cex_zero_mark_price.py`
+(7 tests: kucoin, mexc, ccxt — normal y con mark_price=0),
+`test_finding_13_dex_zero_mark_price.py` (9 tests, uno por cada conector
+DEX afectado) y `test_finding_14_and_15_scale_diagnostics.py` (3 tests:
+el diagnóstico se genera correctamente y NINGÚN valor/fórmula existente se
+ve alterado por él). 84/84 tests pasan en el conjunto completo del
+proyecto tras este cambio, sin regresiones.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

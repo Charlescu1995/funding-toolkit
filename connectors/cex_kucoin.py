@@ -147,6 +147,21 @@ falta ninguna llamada aparte ni conversión: `turnoverOf24h` (ej. XBTUSDTM:
 (USDT), a diferencia de `volumeOf24h` (4724.686), que viene en unidades del
 activo base (XBT) y por tanto necesitaría multiplicarse por el precio —
 `turnoverOf24h` ya hace ese trabajo, así que se usa tal cual.
+
+--- Nota sobre `markPrice == 0` (RESUELTO 2026-09-19, auditoría de bugs,
+    Hallazgo #13 — severidad baja) ---
+
+El cálculo de `open_interest_usd = openInterest * multiplier * markPrice`
+solo comprobaba `mark_price is not None` antes de este fix. Un
+`markPrice: 0` explícito (en vez de campo ausente) habría pasado ese
+chequeo igual y producido `open_interest_usd = 0.0` — un mercado real
+mostrado como si tuviera profundidad cero, indistinguible de un error real,
+en vez de quedar fuera con un aviso. Un mark price de 0 no es físicamente
+plausible para un contrato activo, así que se trata igual que un mark price
+ausente: se descarta a `None` (no se calcula OI, `mark_price` tampoco se
+publica como 0) y se guarda una muestra de diagnóstico, mismo patrón que la
+guardia de OI negativo de más arriba. Nunca observado en vivo todavía — es
+una guardia defensiva, no una causa raíz confirmada como la de SOL/ETH/XBT.
 """
 
 from __future__ import annotations
@@ -200,6 +215,9 @@ class KucoinConnector:
         # debería dispararse en circunstancias normales tras ese fix.
         oi_anomaly_samples: dict[str, dict] = {}
         inverse_excluded: list[str] = []
+        # Ver docstring, "Nota sobre markPrice == 0" (Hallazgo #13 de la
+        # auditoría, 2026-09-19): guardia defensiva, nunca vista en vivo.
+        zero_mark_price_samples: dict[str, float] = {}
 
         for row in rows:
             if not isinstance(row, dict):
@@ -254,6 +272,15 @@ class KucoinConnector:
                     mark_price = float(mark_price_raw)
                 except (TypeError, ValueError):
                     mark_price = None
+                else:
+                    # Ver docstring, "Nota sobre markPrice == 0" (Hallazgo
+                    # #13 de la auditoría, 2026-09-19): un mark price de 0
+                    # no es físicamente plausible para un contrato activo —
+                    # se descarta igual que si no hubiera venido, en vez de
+                    # dejar que open_interest_usd salga 0.0 en silencio.
+                    if mark_price == 0:
+                        zero_mark_price_samples[raw_symbol] = mark_price_raw
+                        mark_price = None
 
             oi_contracts_raw = row.get("openInterest")
             multiplier_raw = row.get("multiplier")
@@ -340,6 +367,16 @@ class KucoinConnector:
                 "vez de propagarse; payload crudo de los tres factores para investigarla): %s",
                 len(oi_anomaly_samples),
                 json.dumps(oi_anomaly_samples, default=str)[:4000],
+            )
+
+        if zero_mark_price_samples:
+            logger.warning(
+                "kucoinfutures DIAGNÓSTICO markPrice == 0 (Hallazgo #13 de la auditoría, "
+                "2026-09-19): %d contrato(s) con markPrice explícito de 0 -- se descartó a "
+                "None (ni mark_price ni open_interest_usd se calculan/publican) en vez de "
+                "dejar que open_interest_usd saliera 0.0 en silencio: %s",
+                len(zero_mark_price_samples),
+                zero_mark_price_samples,
             )
 
         return out

@@ -320,6 +320,18 @@ class CexConnector:
         exchange concreto no da profundidad (ccxt sin soportar el endpoint
         para ese exchange, símbolo mal formado, rate limit...), en vez de un
         "—" mudo que no dice si es un fallo real o simplemente no hay dato.
+
+        Nota sobre `mark_price == 0` (RESUELTO 2026-09-19, auditoría de bugs,
+        Hallazgo #13 — severidad baja; la propia auditoría citó las líneas
+        233-244 de este archivo para este hallazgo, pero ese rango es en
+        realidad el fix del Hallazgo #4/#5 [next_funding_time/interval] —
+        el hueco real de mark_price==0 siempre estuvo aquí, en el fallback
+        contratos×mark_price, no en fetch_funding_rates()): antes de este
+        fix, un mark_price de 0 pasaba el chequeo `is None` y daba
+        value=0.0 en silencio. Se trata ahora como un error explícito por
+        símbolo (mismo criterio que cex_kucoin.py/cex_mexc.py), en vez de
+        publicar una profundidad cero para un mercado que en realidad no
+        se pudo calcular.
         """
         out: dict[str, float] = {}
         errors: dict[str, str] = {}
@@ -338,6 +350,19 @@ class CexConnector:
                     continue
                 if mark_price is None:
                     errors[raw_symbol] = "solo trae openInterestAmount (sin USD) y no hay mark price para estimarlo"
+                    continue
+                # Ver Hallazgo #13 de la auditoría (2026-09-19, severidad
+                # baja): un mark_price de 0 explícito habría pasado el
+                # chequeo `is None` de arriba y dado value=0.0 -- un
+                # mercado real mostrado como si tuviera profundidad cero.
+                # No es plausible para un contrato activo, así que se
+                # trata como si no hubiera mark price (mismo criterio que
+                # cex_kucoin.py/cex_mexc.py).
+                if mark_price == 0:
+                    errors[raw_symbol] = (
+                        f"mark_price recibido es 0 (DIAGNÓSTICO Hallazgo #13) -- no se "
+                        f"calcula openInterestAmount({amount}) * 0"
+                    )
                     continue
                 # Aproximación estándar (misma que usa el exchange para dar el
                 # USD directamente): contratos × precio de marca del momento.

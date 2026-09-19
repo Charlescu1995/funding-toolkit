@@ -81,6 +81,14 @@ añadiría una restricción sin evidencia que la respalde, en la dirección
 contraria al criterio de "no inventar" — podría esconder una oportunidad
 real basándose en una suposición sin confirmar sobre qué mide `apiAllowed`.
 
+**Confirmado en producción real (2026-09-19, primer despliegue de este
+fix)**: el diagnóstico SÍ disparó, con 10 contratos reales
+(`LONG_USDT`, `MUSEBOOK_USDT`, `MCAT_USDT`, `ORBIO_USDT`, `PAID_USDT`,
+`HOOKR_USDT`, `ROBIN_USDT`, `COOL_USDT`, `GSTOCK_USDT`, `PAIR_USDT`) con
+`state=0` pero `apiAllowed=False`. Esto valida con datos reales la
+decisión de no exigir también `apiAllowed`: si se hubiera exigido,
+estos 10 contratos operables se habrían excluido del Ranking por error.
+
 --- Nota sobre contratos inversos/coin-margined (RESUELTO 2026-09-19,
     auditoría de bugs, Hallazgo #12 — mismo hueco que causó el bug de SOL
     en KuCoin) ---
@@ -101,14 +109,15 @@ trae `baseCoin`, `quoteCoin` y `settleCoin` por contrato — campos que solo
 tienen sentido si la API mezcla contratos linear (quote=settle=USDT) e
 inverse (settle en el activo base) en el mismo endpoint bulk.
 
-**Lo que NO se pudo confirmar en vivo**: si `BTC_USD` (u otro contrato
-Coin-M) aparece de verdad en el array de `/api/v1/contract/detail` que
-lee este conector — misma limitación de truncamiento en arrays grandes ya
-documentada varias veces en este proyecto (KuCoin, Lighter, Hallazgo #11):
-solo se pudo ver una porción parcial (~50 de probablemente 1000+
-contratos) con WebFetch, y curl directo está bloqueado por la política de
-red de este sandbox. No hay una fila real observada con
-`settleCoin != quoteCoin`.
+**Confirmado en producción real (2026-09-19, primer despliegue de este
+fix)**: `/api/v1/contract/detail` SÍ trae contratos Coin-M en el mismo
+array bulk que lee este conector — el guard nuevo excluyó 10 contratos
+reales: `ADA_USD`, `AVAX_USD`, `BTC_USD`, `DOGE_USD`, `ETH_USD`,
+`LINK_USD`, `LTC_USD`, `SOL_USD`, `SUI_USD`, `XRP_USD`. Todos estos
+activos ya tienen su contrato linear (`_USDT`) en el Ranking, así que sin
+este fix habrían colisionado de verdad en el símbolo normalizado
+(`"BTC"`, `"ETH"`, etc.) con su hermano linear — el riesgo pasa de
+sospechado (solo por documentación) a confirmado con datos reales.
 
 **Fix**: se excluyen ENTEROS los contratos donde `settleCoin != quoteCoin`
 (ambos presentes) — mismo criterio que KuCoin con `isInverse`, campo real

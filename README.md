@@ -1909,6 +1909,19 @@ resuelve a favor de `state` (confirmado) y queda registrada en el
 diagnóstico nuevo, sin perderse en silencio. 51/51 tests pasan en el
 conjunto completo del proyecto tras este cambio, sin regresiones.
 
+**Actualización (2026-09-19, confirmado con datos REALES de producción,
+mismo despliegue que confirmó el Hallazgo #12 de abajo)**: el diagnóstico
+nuevo SÍ disparó en el primer despliegue, con 10 contratos reales:
+`LONG_USDT`, `MUSEBOOK_USDT`, `MCAT_USDT`, `ORBIO_USDT`, `PAID_USDT`,
+`HOOKR_USDT`, `ROBIN_USDT`, `COOL_USDT`, `GSTOCK_USDT`, `PAIR_USDT` —
+todos con `state=0` (operable según la doc oficial) pero
+`apiAllowed=False`. Esto confirma con evidencia real la decisión de usar
+`state` solo y NO exigir también `apiAllowed`: si se hubiera exigido que
+los dos campos coincidieran (la alternativa más conservadora que se
+consideró), estos 10 contratos reales y operables se habrían excluido del
+Ranking por error — exactamente el falso negativo que se quería evitar al
+no inventar una restricción sin confirmar sobre qué mide `apiAllowed`.
+
 ## Resuelto (2026-09-19): Hallazgo #12 de la auditoría — contratos inversos/coin-margined sin detectar en MEXC
 
 `connectors/cex_mexc.py` solo recortaba el sufijo de la cotización al
@@ -1955,6 +1968,16 @@ específicamente, se confirmó que el inverso NO contamina el OI del linear
 del mismo activo base al colisionar en el símbolo normalizado ("BTC") —
 el escenario exacto que señalaba el Hallazgo #12. 55/55 tests pasan en el
 conjunto completo del proyecto tras este cambio, sin regresiones.
+
+**Actualización (2026-09-19, CONFIRMADO con datos REALES de producción)**:
+el primer despliegue de este fix confirmó exactamente el riesgo que
+señalaba el Hallazgo #12 — 10 contratos Coin-M reales excluidos por el
+guard nuevo: `ADA_USD`, `AVAX_USD`, `BTC_USD`, `DOGE_USD`, `ETH_USD`,
+`LINK_USD`, `LTC_USD`, `SOL_USD`, `SUI_USD`, `XRP_USD`. Todos estos activos
+YA tienen su contrato linear (`_USDT`) en el Ranking, así que antes de este
+fix habrían colisionado de verdad en el símbolo normalizado (`"BTC"`,
+`"ETH"`, etc.) con su hermano linear — el hallazgo pasa de SOSPECHOSO a
+CONFIRMADO con evidencia real, no solo de documentación.
 
 ## Importante sobre dónde correr esto
 

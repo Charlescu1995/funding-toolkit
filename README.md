@@ -1339,14 +1339,48 @@ necesidad de una función aparte el caso de Volumen $0 exacto de arriba (0 <
 `LOW_LIQUIDITY_FLOOR_USD = 1000.0`, mismo patrón que
 `has_dead_liquidity()`/`has_implausible_price_pair()` — una función que
 solo pregunta "¿se descarta?", y `pages/1_Funding_Rates.py` filtra Y
-enseña un panel de diagnóstico con las filas descartadas y sus dos
-cuellos de botella, para no tirar datos en silencio. `None` (dato no
-consultado, no confirmado) nunca cuenta como "por debajo del piso" —
-mismo criterio que ya usaba `has_dead_liquidity()`. Test con el caso real
-del CSV (MNT grvt/hyperliquid, OI=$261/Vol=$347 → descartado), el caso de
-Volumen $0 exacto, los bordes del umbral y un caso de liquidez sana de
-control. Pendiente de confirmación en producción con un CSV fresco del
-Ranking tras el redespliegue.
+enseña un panel de diagnóstico con las filas descartadas, para no tirar
+datos en silencio. `None` (dato no consultado, no confirmado) nunca cuenta
+como "por debajo del piso".
+
+**Bug real encontrado en producción (2026-09-19) y corregido el mismo
+día**: la primera versión de `has_low_liquidity()` miraba
+`oi_bottleneck_usd`/`volume_bottleneck_usd` (el cuello de botella ya
+calculado, el MIN de las dos piernas) — pero esos campos SOLO se calculan
+cuando las DOS piernas tienen dato confirmado (ver `apply_oi_map()`/
+`compute_opportunities()`). Si una pierna no se llegó a consultar (`None`
+— la mayoría de filas del ranking, porque el OI Depth real solo se pide
+para el top N y el Volumen depende de si el conector lo trae en el fetch
+masivo), el "cuello de botella" se quedaba en `None` aunque la OTRA pierna
+ya estuviera confirmada y fuera claramente ilíquida, así que la fila
+pasaba el filtro intacta. El usuario lo pilló mirando la tabla del
+Ranking tras desplegar: filas como **B2** (Volumen 24h CONFIRMADO=$16 en
+la pierna short de aster, con el long en `None`) o **TRUST** (Volumen 24h
+CONFIRMADO=$168 en variational, long en `None`) — exactamente el tipo de
+trampa que este piso se creó para evitar — seguían apareciendo en el
+Ranking sin ningún aviso.
+
+**Fix**: `has_low_liquidity()` ahora comprueba las CUATRO piernas sueltas
+(`oi_long_usd`, `oi_short_usd`, `volume_long_usd`, `volume_short_usd`) por
+separado en vez del cuello de botella agregado — se descarta si
+CUALQUIERA de las cuatro, aunque sea una sola, tiene un valor confirmado
+por debajo del piso, sin esperar a que la pareja completa esté disponible.
+Mismo criterio "por pierna suelta" que ya usaba `has_dead_liquidity()`
+desde el principio — el bug fue no haber seguido ese mismo patrón la
+primera vez. De paso se corrigió un riesgo de excepción en el panel de
+diagnóstico de Streamlit: el orden de la tabla usaba
+`min(cuello_de_botella_oi, cuello_de_botella_vol)` descartando `None`, que
+podía quedarse sin ningún valor (`ValueError: min() arg is an empty
+sequence`) precisamente en las filas nuevas que ahora sí se descartan por
+una sola pierna — sustituido por un `_min_known()` que devuelve `inf`
+cuando las cuatro piernas son `None`, y la tabla ahora enseña las cuatro
+piernas sueltas en vez de solo los dos cuellos de botella. Test de
+regresión con los casos reales B2/TRUST (una sola pierna confirmada y
+baja, con el bottleneck en `None` por la otra pierna sin consultar) más
+el caso real del CSV original (MNT grvt/hyperliquid, OI=$261/Vol=$347),
+Volumen $0 exacto, los bordes del umbral y liquidez sana de control.
+Pendiente de confirmación en producción con un CSV fresco del Ranking
+tras el redespliegue.
 
 De paso, estudiando el mismo CSV aparecieron dos hallazgos más sin
 investigar todavía:

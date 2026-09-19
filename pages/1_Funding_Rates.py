@@ -288,22 +288,27 @@ with tab_ranking:
 
         # Ver core/opportunities.py::has_low_liquidity — piso de liquidez
         # mínima pedido por el usuario tras estudiar el CSV completo del
-        # Ranking (2026-09-19): un Cuello de botella de OI o Volumen 24h
-        # CONFIRMADO por debajo de $1.000 en cualquiera de las dos piernas es
-        # "una trampa" (Spread APR llamativo, pero imposible de operar en
-        # ningún tamaño real) — no solo el caso extremo de $0 exacto que ya
-        # saca has_dead_liquidity de arriba.
+        # Ranking (2026-09-19): un OI o Volumen 24h CONFIRMADO por debajo de
+        # $1.000 en CUALQUIERA de las cuatro piernas (OI long/short, Vol
+        # long/short — no solo el "cuello de botella" ya calculado, que
+        # exige las dos piernas conocidas, ver el bug real documentado en el
+        # docstring de has_low_liquidity) es "una trampa" (Spread APR
+        # llamativo, pero imposible de operar en ningún tamaño real) — no
+        # solo el caso extremo de $0 exacto que ya saca has_dead_liquidity
+        # de arriba.
         low_liquidity = [o for o in opportunities if has_low_liquidity(o)]
         opportunities = [o for o in opportunities if not has_low_liquidity(o)]
 
         if low_liquidity:
             symbols_low_liquidity = ", ".join(sorted({o.symbol for o in low_liquidity}))
             st.caption(
-                f"⚠️ {len(low_liquidity)} oportunidad(es) descartada(s) del ranking por Cuello de "
-                f"botella de OI o Volumen 24h por debajo de ${LOW_LIQUIDITY_FLOOR_USD:,.0f} "
-                f"confirmado en una de las dos piernas ({symbols_low_liquidity}) — casi nadie "
-                "tradeando de verdad ahí, así que no es una operación ejecutable en ningún tamaño "
-                "razonable aunque el Spread APR parezca bueno. Detalle en el diagnóstico de abajo."
+                f"⚠️ {len(low_liquidity)} oportunidad(es) descartada(s) del ranking por OI o "
+                f"Volumen 24h por debajo de ${LOW_LIQUIDITY_FLOOR_USD:,.0f} confirmado en al menos "
+                f"una pierna ({symbols_low_liquidity}) — no hace falta que las dos piernas tengan "
+                "dato, con que UNA sola esté confirmada por debajo del piso ya es una trampa: casi "
+                "nadie tradeando de verdad ahí, así que no es una operación ejecutable en ningún "
+                "tamaño razonable aunque el Spread APR parezca bueno. Detalle en el diagnóstico de "
+                "abajo."
             )
 
         if not opportunities:
@@ -450,17 +455,26 @@ if dead_liquidity:
 
 if low_liquidity:
     with st.expander(
-        f"Diagnóstico: {len(low_liquidity)} oportunidad(es) descartada(s) por Cuello de botella de "
-        f"liquidez < ${LOW_LIQUIDITY_FLOOR_USD:,.0f}"
+        f"Diagnóstico: {len(low_liquidity)} oportunidad(es) descartada(s) por liquidez "
+        f"< ${LOW_LIQUIDITY_FLOOR_USD:,.0f}"
     ):
         st.caption(
-            "Ver core/opportunities.py::has_low_liquidity. Se descarta si el Cuello de botella de "
-            f"OI o de Volumen 24h (el menor de las dos piernas) es un valor CONFIRMADO por debajo "
-            f"de ${LOW_LIQUIDITY_FLOOR_USD:,.0f} — no incluye filas donde ese dato simplemente no "
-            "se consultó (eso se enseña como «—» en la tabla, no se descarta). Umbral calibrado "
-            "contra los percentiles del CSV completo del Ranking (ver README): cae entre p5 y p10 "
-            "de ambas distribuciones, así que solo saca el ~5-8% más ilíquido de cada una."
+            "Ver core/opportunities.py::has_low_liquidity. Se descarta si CUALQUIERA de las cuatro "
+            f"piernas (OI long, OI short, Vol 24h long, Vol 24h short) tiene un valor CONFIRMADO "
+            f"por debajo de ${LOW_LIQUIDITY_FLOOR_USD:,.0f} — no hace falta que las dos piernas de "
+            "un mismo lado (OI o Vol) tengan dato: una sola pierna confirmada ya basta, no incluye "
+            "filas donde ese dato simplemente no se consultó (eso se enseña como «—» en la tabla, "
+            "no se descarta). Bug real corregido el 2026-09-19: la primera versión solo miraba el "
+            "'cuello de botella' ya calculado (que exige las DOS piernas conocidas) y dejaba pasar "
+            "casos como B2 (Vol 24h short confirmado=$16, con la otra pierna sin consultar). Umbral "
+            "calibrado contra los percentiles del CSV completo del Ranking (ver README): cae entre "
+            "p5 y p10 de ambas distribuciones, así que solo saca el ~5-8% más ilíquido de cada una."
         )
+
+        def _min_known(*values: float | None) -> float:
+            known = [v for v in values if v is not None]
+            return min(known) if known else float("inf")
+
         st.dataframe(
             pd.DataFrame(
                 [
@@ -469,13 +483,15 @@ if low_liquidity:
                         "Long en": o.long_exchange,
                         "Short en": o.short_exchange,
                         "Spread APR descartado": f"{o.spread_apr:.1f}%",
-                        "Cuello de botella OI ($)": o.oi_bottleneck_usd,
-                        "Cuello de botella Vol ($)": o.volume_bottleneck_usd,
+                        "OI long ($)": o.oi_long_usd,
+                        "OI short ($)": o.oi_short_usd,
+                        "Vol 24h long ($)": o.volume_long_usd,
+                        "Vol 24h short ($)": o.volume_short_usd,
                     }
                     for o in sorted(
                         low_liquidity,
-                        key=lambda o: min(
-                            v for v in (o.oi_bottleneck_usd, o.volume_bottleneck_usd) if v is not None
+                        key=lambda o: _min_known(
+                            o.oi_long_usd, o.oi_short_usd, o.volume_long_usd, o.volume_short_usd
                         ),
                     )
                 ]

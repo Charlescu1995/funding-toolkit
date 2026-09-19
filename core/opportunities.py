@@ -332,10 +332,9 @@ LOW_LIQUIDITY_FLOOR_USD = 1000.0
 
 def has_low_liquidity(opp: OpportunityRow, floor_usd: float = LOW_LIQUIDITY_FLOOR_USD) -> bool:
     """
-    True si el cuello de botella de OI o el de Volumen 24h (el menor de las
-    dos piernas — oi_bottleneck_usd / volume_bottleneck_usd, ya calculados
-    en compute_opportunities()/apply_oi_map()) es un valor CONFIRMADO por
-    debajo de `floor_usd`.
+    True si CUALQUIER pierna individual (oi_long_usd, oi_short_usd,
+    volume_long_usd, volume_short_usd) tiene un valor CONFIRMADO por debajo
+    de `floor_usd`.
 
     "Confirmado" es la palabra clave: `None` (todavía no se consultó ese
     dato — Depth fuera del top N enriquecido, o el exchange no lo trae en
@@ -345,15 +344,25 @@ def has_low_liquidity(opp: OpportunityRow, floor_usd: float = LOW_LIQUIDITY_FLOO
     interfaz) en vez de solo las que de verdad se confirmó que son
     ilíquidas — mismo criterio que ya usa has_dead_liquidity() de arriba.
 
-    Se descarta si CUALQUIERA de los dos lados (OI o Volumen) cae por
-    debajo del piso, no solo si caen los dos a la vez: un volumen casi nulo
-    ya es la trampa por sí solo aunque el OI parezca alto — sin nadie
-    tradeando de verdad no se puede entrar ni salir de la posición sin
-    mover el precio.
+    BUG REAL encontrado en producción (2026-09-19, ver README): la primera
+    versión de esta función miraba oi_bottleneck_usd/volume_bottleneck_usd
+    (el MIN ya calculado de las dos piernas) en vez de las piernas sueltas.
+    El problema es que esos campos "bottleneck" solo se calculan cuando las
+    DOS piernas tienen dato — si una pierna no se llegó a consultar (None),
+    el bottleneck se queda en None aunque la OTRA pierna ya esté confirmada
+    y sea claramente ilíquida, así que la fila se colaba en el ranking sin
+    descartar. Visto real en el usuario: B2 (short en aster, Volumen 24h
+    CONFIRMADO=$16) y TRUST (short en variational, Volumen 24h
+    CONFIRMADO=$168) — ambas con la otra pierna en None — pasaban el
+    filtro intactas. Se descarta si CUALQUIERA de las cuatro piernas cae
+    por debajo del piso, exactamente el mismo criterio "por pierna" que ya
+    usa has_dead_liquidity() de arriba — no hace falta esperar a tener las
+    dos piernas para saber que una ya es una trampa.
     """
-    below_oi = opp.oi_bottleneck_usd is not None and opp.oi_bottleneck_usd < floor_usd
-    below_volume = opp.volume_bottleneck_usd is not None and opp.volume_bottleneck_usd < floor_usd
-    return below_oi or below_volume
+    for value in (opp.oi_long_usd, opp.oi_short_usd, opp.volume_long_usd, opp.volume_short_usd):
+        if value is not None and value < floor_usd:
+            return True
+    return False
 
 
 def enrich_oi_depth(opportunities: list[OpportunityRow], top_n: int = 10) -> dict[OiTarget, str]:

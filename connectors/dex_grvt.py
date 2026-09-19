@@ -288,6 +288,54 @@ con un test que usa los valores EXACTOS de los tres despliegues de arriba.
     tres despliegues independientes (ver arriba).
   - Intervalo de liquidación (8h) y el nombre del campo de funding rate:
     siguen confirmados de rondas anteriores, sin cambios.
+
+--- Nota sobre funding_rate vs. funding_rate_8h_curr — RESUELTO
+    (2026-09-19, auditoría de bugs, Hallazgos #7 y #8) ---
+
+Dos problemas distintos en la misma línea de código (la cadena de fallback
+de más abajo), arreglados juntos.
+
+**Hallazgo #7 (bug real de Python, CONFIRMADO por lectura de código)**: la
+cadena `ticker.get("funding_rate", ticker.get("funding_rate_8h_curr", ...))`
+usaba `dict.get(clave, default)`, que solo devuelve `default` cuando la
+CLAVE NO EXISTE — si GRVT mandara alguna vez `"funding_rate_8h_curr": null`
+en vez de omitir la clave, `.get()` devolvería `None` directamente y el
+resto de la cadena (`funding_rate_curr`) nunca se llegaría a probar, aunque
+tuviera un valor válido. No se ha visto ese `null` explícito en producción
+todavía (ver claves vistas en vivo más arriba — el campo simplemente no
+aparecía cuando faltaba), pero es un fallo real de la lógica del fallback,
+no solo hipotético. Fix: iterar los campos candidatos y saltar cualquier
+valor `None`, sea por clave ausente o por clave presente-pero-null.
+
+**Hallazgo #8 (unidad sin confirmar, SOSPECHOSO -- descartado con
+cautela)**: la lista de claves vistas EN VIVO en un ticker real de GRVT
+(más arriba en este docstring, "Claves completas vistas en vivo") es
+`funding_rate_8h_curr`/`funding_rate_8h_avg` — el campo nuevo
+`funding_rate` que menciona la documentación de GRVT ("expressed in
+centibeeps") **no aparece en esa lista en absoluto**. Es decir: con el
+código anterior, que probaba `funding_rate` PRIMERO, ese intento siempre
+devolvía `None` en la práctica (la clave no existe) y caía a
+`funding_rate_8h_curr` de todos modos — el ÷100 confirmado con tres
+despliegues reales SÍ es el que se ha estado aplicando hasta ahora. Pero
+si GRVT alguna vez completa la migración que su propia documentación
+insinúa (los campos `_8h_curr` están marcados DEPRECATED) y empieza a
+rellenar `funding_rate` con datos reales, el código anterior le habría
+aplicado el mismo ÷100 sin ninguna verificación — podría ser "centibeeps"
+de verdad (÷1e6, la unidad que la propia documentación de GRVT dice para
+ese campo) o cualquier otra escala distinta a la de `funding_rate_8h_curr`.
+
+**Fix**: se invierte la prioridad -- se prueban primero los dos campos
+CONFIRMADOS (`funding_rate_8h_curr`, `funding_rate_curr`) y solo si ambos
+faltan se mira `funding_rate`; si ese campo trae un valor real, el
+instrumento se DESCARTA (no se incluye con un ÷100 adivinado) y se guarda
+el valor crudo en un diagnóstico aparte (`unconfirmed_rate_field_samples`,
+log `grvt DIAGNÓSTICO funding_rate`) para poder confirmar su unidad real
+el día que esto pase, en vez de mostrar un APR potencialmente erróneo como
+si fuera de fiar — mismo criterio que excluir los contratos inversos de
+KuCoin en vez de adivinar su fórmula de conversión. Hoy este camino nunca
+se dispara (confirmado: la clave no existe en el ticker real), así que el
+comportamiento observable no cambia — es una protección para el día que
+GRVT complete esa migración.
 """
 
 from __future__ import annotations
@@ -430,6 +478,13 @@ class GrvtConnector:
         unparsed_samples: dict[str, object] = {}
         # Ver comentario más abajo, dentro del bucle, sobre cuándo se rellena.
         ticker_diagnostic_samples: dict[str, dict] = {}
+        # Ver "Nota sobre funding_rate vs. funding_rate_8h_curr" más abajo
+        # (auditoría de bugs, Hallazgos #7 y #8, 2026-09-19): instrumentos
+        # donde el ÚNICO campo de tasa con valor real es el nuevo
+        # "funding_rate" (sin confirmar todavía con ningún dato en vivo) --
+        # se descartan en vez de aplicarles el /100 a ciegas, y se guardan
+        # aquí para poder confirmar su unidad real el día que aparezcan.
+        unconfirmed_rate_field_samples: dict[str, object] = {}
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             future_to_name = {
@@ -456,27 +511,48 @@ class GrvtConnector:
                         unparsed_samples[name] = payload
                     continue
 
-                # Ver docstring del módulo: el primer despliegue con diagnóstico
-                # reveló que el campo real NO es "funding_rate_curr" (lo que
-                # decía la documentación/SDK), sino "funding_rate_8h_curr". Hoy
-                # (2026-09-16), releyendo la documentación oficial en vivo para
-                # el bug de escala de OI/Volumen, se confirmó que
-                # `funding_rate_8h_curr`/`funding_rate_8h_avg` están marcados
-                # DEPRECATED en el esquema actual, y existe un campo nuevo
-                # `funding_rate` (la documentación dice "expressed in
-                # centibeeps", pero ver "CONFIRMADO y corregido" en el
-                # docstring del módulo: los valores reales en producción no
-                # encajan con esa unidad — encajan con un % humano directo del
-                # periodo de 8h, de ahí la división ÷100.0 de abajo, NO
-                # ×CENTIBEEPS_TO_DECIMAL). Se prueba el nuevo campo primero y
-                # se cae a los antiguos por compatibilidad, en vez de esperar
-                # a que GRVT retire el campo deprecated y rompa el conector
-                # sin avisar.
-                rate_raw = ticker.get(
-                    "funding_rate",
-                    ticker.get("funding_rate_8h_curr", ticker.get("funding_rate_curr")),
-                )
+                # Ver docstring del módulo, "Nota sobre funding_rate vs.
+                # funding_rate_8h_curr — RESUELTO (2026-09-19, auditoría de
+                # bugs, Hallazgos #7 y #8)".
+                #
+                # Hallazgo #7 (bug real de Python, corregido): la versión
+                # anterior encadenaba `ticker.get("a", ticker.get("b", ...))`
+                # — `dict.get(clave, default)` solo usa `default` cuando la
+                # CLAVE NO EXISTE, no cuando existe con valor `None` explícito.
+                # Si GRVT alguna vez manda `"funding_rate_8h_curr": null` en
+                # vez de omitir la clave, esa cadena se rompía sin probar el
+                # resto de candidatos. Ahora se itera la lista de campos y se
+                # salta cualquier valor `None`, venga la clave ausente o
+                # presente-pero-null.
+                #
+                # Hallazgo #8 (unidad sin confirmar, tratado con cautela): las
+                # claves vistas EN VIVO en un ticker real de GRVT (ver arriba
+                # en el docstring, "Claves completas vistas en vivo") son
+                # `funding_rate_8h_curr`/`funding_rate_8h_avg` — el campo
+                # nuevo `funding_rate` que menciona la documentación NO
+                # aparece en absoluto en esa lista, así que hoy nunca se
+                # dispara. El ÷100 solo está confirmado (tres despliegues
+                # independientes, ver docstring) para
+                # `funding_rate_8h_curr`/`funding_rate_curr` — si algún día
+                # `funding_rate` empieza a traer un valor real, NO se le
+                # aplica el mismo ÷100 a ciegas (podría ser "centibeeps" de
+                # verdad, u otra unidad distinta): se descarta ese
+                # instrumento y se guarda el valor crudo en un diagnóstico
+                # aparte, mismo criterio que excluir los contratos inversos
+                # de KuCoin en vez de adivinar su conversión.
+                rate_raw = None
+                for candidate_key in ("funding_rate_8h_curr", "funding_rate_curr"):
+                    candidate_value = ticker.get(candidate_key)
+                    if candidate_value is not None:
+                        rate_raw = candidate_value
+                        break
+
                 if rate_raw is None:
+                    unconfirmed_raw = ticker.get("funding_rate")
+                    if unconfirmed_raw is not None:
+                        if len(unconfirmed_rate_field_samples) < 6:
+                            unconfirmed_rate_field_samples[name] = unconfirmed_raw
+                        continue
                     if len(unparsed_samples) < 3:
                         # Aquí sí encontramos un "ticker", pero sin el campo
                         # que esperábamos — guardamos las claves que SÍ trae,
@@ -560,6 +636,18 @@ class GrvtConnector:
                 "crudo/calculado, para confirmar si ESE campo necesita el mismo tipo de arreglo): %s",
                 len(ticker_diagnostic_samples),
                 json.dumps(ticker_diagnostic_samples, default=str)[:4000],
+            )
+
+        if unconfirmed_rate_field_samples:
+            logger.warning(
+                "grvt DIAGNÓSTICO funding_rate (campo NUEVO, sin confirmar -- ver Hallazgo #8 "
+                "de la auditoría, 2026-09-19): %d instrumento(s) trajeron valor real en "
+                "'funding_rate' sin 'funding_rate_8h_curr'/'funding_rate_curr' -- se "
+                "DESCARTARON en vez de aplicarles el /100 confirmado solo para los campos "
+                "antiguos, hasta poder confirmar la unidad real de este campo con estos "
+                "valores crudos: %s",
+                len(unconfirmed_rate_field_samples),
+                json.dumps(unconfirmed_rate_field_samples, default=str)[:4000],
             )
 
         if not out:

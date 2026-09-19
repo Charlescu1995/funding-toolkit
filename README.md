@@ -1676,6 +1676,91 @@ un `status` ausente no se descarta, mismo criterio que Extended. 32/32
 tests pasan en el conjunto completo del proyecto tras este cambio, sin
 regresiones.
 
+## Resuelto (2026-09-19): Hallazgos #7 y #8 de la auditoría — cadena de fallback de `funding_rate` en GRVT
+
+Ambos en el mismo bloque de código (`connectors/dex_grvt.py`, la línea que
+resuelve qué campo usar para la tasa de funding de cada instrumento),
+resueltos a la vez.
+
+**Hallazgo #7 — bug real de Python, CONFIRMADO por lectura de código: un
+`null` explícito rompería el fallback entero.** El código anterior
+encadenaba los candidatos con `.get()` anidados:
+
+```python
+rate_raw = ticker.get(
+    "funding_rate",
+    ticker.get("funding_rate_8h_curr", ticker.get("funding_rate_curr")),
+)
+```
+
+`dict.get(clave, default)` solo devuelve `default` cuando la CLAVE NO
+EXISTE — si la clave existe con valor `None` explícito, `.get()` devuelve
+ese `None`, no sigue probando el resto de la cadena. Con esta forma de
+escribirlo, si GRVT mandara algún día `"funding_rate": null` de forma
+explícita (en vez de omitir la clave), el resultado sería `None` aunque
+`funding_rate_8h_curr` sí trajera un valor real — el resto de la cadena
+nunca llegaba a probarse. No hay evidencia de que GRVT haga esto hoy (no
+se ha observado en producción), pero es un bug real del propio Python en
+la forma en que estaba escrito el fallback, no una suposición.
+
+**Fix**: se sustituyó la cadena de `.get()` anidados por un bucle explícito
+que prueba cada clave candidata por orden y solo la descarta si su valor
+es `None` — sin importar si la clave estaba ausente o presente-pero-nula,
+el resultado es el mismo (seguir probando la siguiente), que es el
+comportamiento que la cadena de `.get()` anidados solo daba por accidente
+cuando las claves estaban ausentes.
+
+**Hallazgo #8 — el `÷100` solo está confirmado para los campos antiguos,
+pero se aplicaba igual si el valor viniera del campo nuevo `funding_rate`
+(unidad sin confirmar, potencialmente "centibeeps" según la documentación
+de GRVT) — SOSPECHOSO.** La cadena de fallback anterior probaba
+`funding_rate` PRIMERO, antes que `funding_rate_8h_curr`/
+`funding_rate_curr` — es decir, si `funding_rate` alguna vez trajera un
+valor real, se le habría aplicado a ciegas el mismo `÷100` que solo está
+confirmado (tres despliegues de producción independientes, ver la sección
+de más arriba) para los campos antiguos. El `÷100` de `funding_rate_8h_curr`
+y el "centibeeps" (`×1e-6`) que la documentación de GRVT sugiere para
+`funding_rate` son conversiones muy distintas — aplicar la equivocada
+daría un número con la escala completamente rota, silenciosamente.
+
+**Antes de tocar nada se confirmó qué trae realmente `funding_rate` hoy**:
+la lista completa de claves capturada de un log real de producción (ya
+documentada en el propio docstring del módulo, sección "ESTADO ACTUAL
+CONFIRMADO") incluye `funding_rate_8h_curr` y `funding_rate_8h_avg`, pero
+**`funding_rate` nunca ha aparecido con datos reales en ninguna captura de
+producción** — no es que esté mal medido, es que GRVT simplemente no lo
+está sirviendo todavía en el endpoint de ticker que usa este conector.
+Se intentó re-confirmar en vivo con WebFetch contra
+`market-data.grvt.io/full/v1/ticker`, pero ese endpoint solo acepta POST
+(WebFetch únicamente hace GET, da `405`), así que no hay forma de volver a
+comprobarlo desde este entorno — se usó la evidencia ya capturada y
+documentada en el módulo en vez de inventar una nueva.
+
+**Fix**: se invirtió el orden de prioridad (los campos confirmados
+primero) y, si el único valor real disponible viene de `funding_rate`
+(sin confirmar), el instrumento se **descarta** en vez de adivinar su
+escala — igual que el patrón ya establecido para KuCoin con los contratos
+inversos sin confirmar. Se añadió un diagnóstico (`logger.warning`)
+separado que registra, si esto llega a pasar alguna vez, el nombre del
+instrumento y el valor crudo de `funding_rate`, para poder confirmar su
+unidad real con datos de producción en vez de suponerla. **Como
+`funding_rate` no ha aparecido nunca con datos reales, este fix no cambia
+ningún dato visible en el Ranking hoy** — es protección de cara al futuro,
+para el día en que GRVT complete la migración a ese campo.
+
+**Verificado** con un test nuevo (`test_grvt_funding_rate_fallback.py`, 5
+tests): un `null` explícito en el primer campo confirmado ya no rompe la
+cadena (cae correctamente al segundo campo confirmado); con los dos
+campos confirmados en `null` y sin `funding_rate`, el instrumento se
+descarta sin lanzar ninguna excepción; el caso normal (`funding_rate_8h_curr`
+con el `÷100` ya verificado) sigue exactamente igual que antes; un valor
+real solo en `funding_rate` (sin confirmar) se descarta — no se le aplica
+el `÷100` — y queda registrado en el diagnóstico nuevo con el nombre del
+instrumento; y si algún día coexistieran ambos campos (migración a
+medias), el campo confirmado tiene prioridad sobre el nuevo. 37/37 tests
+pasan en el conjunto completo del proyecto tras este cambio, sin
+regresiones.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

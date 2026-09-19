@@ -159,6 +159,18 @@ conocido en los logs — si esta conexión no está llegando a completarse en
 producción todavía, este diagnóstico no producirá ningún dato hasta que
 ese problema de conectividad se resuelva primero; la confirmación de la
 escala está bloqueada detrás de eso, no solo de la falta de evidencia.
+Confirmado en el primer despliegue de este fix (2026-09-19): efectivamente
+sigue fallando con `ssl.SSLEOFError` contra `gateway.prod.vertexprotocol.com`,
+antes incluso de llegar al código de este diagnóstico.
+
+Nota sobre el nivel del log (2026-09-19, corregida tras ese mismo
+despliegue): se loguea a nivel WARNING, no INFO -- la app nunca llama
+`logging.basicConfig()`, así que el logger raíz se queda en su nivel por
+defecto (WARNING) y cualquier `logger.info(...)` se descarta antes de
+llegar a los logs de Streamlit Cloud (confirmado con el diagnóstico gemelo
+de Paradex, que sí corrió sin errores ese despliegue y aun así no apareció
+en el log, por estar a nivel INFO). Mismo nivel que el resto de
+diagnósticos del proyecto.
 """
 
 from __future__ import annotations
@@ -374,7 +386,7 @@ class VertexConnector:
             )
 
         if scale_diagnostic_samples:
-            logger.info(
+            logger.warning(
                 "vertex DIAGNÓSTICO escala funding_rate/open_interest (Hallazgo #15 de la "
                 "auditoría, 2026-09-19 -- SOSPECHOSO, ver docstring del módulo, la asunción "
                 "menos confirmada de este conector): muestra de %d producto(s) este ciclo, "

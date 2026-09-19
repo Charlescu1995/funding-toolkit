@@ -2049,6 +2049,30 @@ el diagnóstico se genera correctamente y NINGÚN valor/fórmula existente se
 ve alterado por él). 84/84 tests pasan en el conjunto completo del
 proyecto tras este cambio, sin regresiones.
 
+**Corrección tras el primer despliegue (2026-09-19)**: el primer log de
+producción con este fix mostró que Paradex corrió sin ningún error, pero su
+diagnóstico del Hallazgo #14 NO apareció en el log. Causa: los dos
+diagnósticos nuevos (#14 y #15) se habían logueado a nivel `INFO`, y esta
+app nunca llama a `logging.basicConfig()` en ningún sitio — así que el
+logger raíz de Python se queda en su nivel por defecto (`WARNING`) y
+cualquier `logger.info(...)` de todo el proyecto se descarta en silencio
+antes de llegar a los logs de Streamlit Cloud. Se corrigieron ambos a nivel
+`WARNING`, el mismo que ya usa el resto de diagnósticos del proyecto (MEXC
+#11/#12, OI negativo, GRVT) — no es una excepción nueva, es alinearlos con
+el patrón que ya funciona. Vertex, aparte de esto, sigue fallando por SSL
+(`ssl.SSLEOFError` contra `gateway.prod.vertexprotocol.com`) antes siquiera
+de llegar a ese código, confirmando lo que ya decía el docstring del módulo.
+
+Nota para el futuro: este mismo problema de visibilidad (INFO nunca llega a
+los logs) probablemente afecta también a logs ya existentes de sesiones
+anteriores que se dejaron a nivel INFO a propósito (ej. la exclusión de
+contratos inversos en `cex_kucoin.py`, la exclusión de mercados inactivos en
+`dex_lighter.py`) — no se tocaron en este cambio por quedar fuera del
+alcance de los Hallazgos #13/#14/#15, pero es el mismo "hueco de
+visibilidad de logging" que ya se había marcado como futurible en una
+sesión anterior, ahora con una causa raíz concreta identificada
+(`logging.basicConfig()` nunca se llama) en vez de solo la sospecha.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

@@ -75,6 +75,16 @@ de siempre: mejor no tocar que adivinar). En su lugar, `fetch_funding_rates()`
 deja un log de diagnóstico (`paradex DIAGNÓSTICO escala de funding_rate`)
 con los primeros valores crudos de cada ciclo, para poder contrastar la
 magnitud real contra lo esperado en el próximo log de producción.
+
+Nota (2026-09-19, corregida tras el primer despliegue de este diagnóstico):
+se loguea a nivel WARNING, no INFO -- la app nunca llama
+`logging.basicConfig()` en ningún sitio, así que el logger raíz se queda en
+su nivel por defecto (WARNING) y cualquier `logger.info(...)` de todo el
+proyecto se descarta antes de llegar a los logs de Streamlit Cloud. Se
+confirmó en el primer despliegue real: Paradex corrió sin errores pero el
+diagnóstico (escrito primero a nivel INFO) no apareció en el log. Mismo
+nivel que ya usan el resto de diagnósticos del proyecto (MEXC #11/#12, OI
+negativo, GRVT).
 """
 
 from __future__ import annotations
@@ -197,7 +207,7 @@ class ParadexConnector:
             )
 
         if funding_rate_samples:
-            logger.info(
+            logger.warning(
                 "paradex DIAGNÓSTICO escala de funding_rate (Hallazgo #14 de la auditoría, "
                 "2026-09-19 -- SOSPECHOSO, sin verificar en vivo, ver docstring del módulo): "
                 "muestra de los primeros %d valores crudos recibidos este ciclo, para "

@@ -9,7 +9,8 @@ MEXC reparte la información en TRES endpoints públicos, todos bulk (sin pool
 de hilos):
 
     GET https://contract.mexc.com/api/v1/contract/detail
-        -> metadata de todos los contratos: contractSize, operable (apiAllowed)
+        -> metadata de todos los contratos: contractSize, operable (state),
+           linear vs inverso (quoteCoin/settleCoin)
     GET https://contract.mexc.com/api/v1/contract/funding_rate
         -> funding rate, intervalo (collectCycle) y precios, de todos los contratos
     GET https://contract.mexc.com/api/v1/contract/ticker
@@ -35,14 +36,86 @@ esquema que el resto — no hay nada que arreglar ni filtrar. Como este
 proyecto cubre "cripto + RWA" por diseño (ver README), se dejan sin filtrar:
 son oportunidades legítimas más, no ruido.
 
---- Nota sobre `apiAllowed` como filtro de operable (en vez de `state`) ---
+--- Nota sobre `state` como filtro de operable (RESUELTO 2026-09-19,
+    auditoría de bugs, Hallazgo #11 — antes se usaba `apiAllowed`) ---
 
-Cada contrato en /contract/detail trae `state` (0 en el único contrato
-consultado en vivo, BTC_USDT) y `apiAllowed` (true). Se usa `apiAllowed`
-como filtro porque su nombre es autoexplicativo — el mapeo completo de
-valores de `state` no está documentado ni se ha podido confirmar con más de
-un ejemplo en vivo, mismo criterio de precaución que con `status`/
-`orderBookState` en el resto de conectores del proyecto.
+Versión anterior de este conector: se usaba `apiAllowed` como filtro de
+"¿este contrato está vivo?" porque su nombre parecía autoexplicativo, y se
+dejaba `state` sin usar porque su mapeo "no estaba documentado" (solo se
+había visto un ejemplo en vivo, BTC_USDT, con `state=0`/`apiAllowed=true`).
+La auditoría de bugs (Hallazgo #11) señaló que esto era el mismo patrón
+exacto que el bug real ya arreglado en `dex_extended.py`: un campo con
+nombre prometedor que no es el que de verdad marca "delistado".
+
+**Confirmado leyendo la documentación oficial de MEXC**
+(mexcdevelop.github.io/apidocs/contract_v1_en/, 2026-09-19):
+
+    "state": 0, "status, 0:enabled,1:delivery, 2:completed, 3:offline, 4:pause"
+    "apiAllowed": bool, "whether support api"
+
+`state` ES el campo de estado de listado (el equivalente exacto al
+`status`/`orderBookState` de KuCoin/Extended) — `apiAllowed` es, según la
+propia doc, un flag de si la API soporta ese contrato, no un estado de
+listado. Como este proyecto solo lee endpoints públicos de solo lectura
+(no opera vía API), lo que importa es si el contrato está listado y
+operable (`state`), no ese flag de soporte de API cuyo alcance exacto
+sigue sin aclarar del todo la doc.
+
+Se intentó confirmar EN VIVO si algún contrato real diverge (`state` != 0
+con `apiAllowed=true`, o viceversa) con dos llamadas WebFetch a
+`/api/v1/contract/detail` — misma limitación de truncamiento en arrays
+grandes ya documentada varias veces en este proyecto (KuCoin, Lighter):
+solo se ve una porción parcial del array (probablemente >1000 contratos),
+y en esa porción todos traían `state=0` y `apiAllowed=true`. No hay, de
+momento, ningún caso real observado donde diverjan.
+
+**Fix**: se usa `state == 0` como filtro principal de operable en vez de
+`apiAllowed` — un `state` ausente NO descarta el símbolo (mismo criterio
+de "sin evidencia de que esté mal" ya usado en el resto del proyecto).
+`apiAllowed` se sigue capturando, pero solo para un diagnóstico: si algún
+día un contrato trae `state` y `apiAllowed` en desacuerdo, queda registrado
+en un log en vez de perderse en silencio — igual que el diagnóstico ya
+existente para el campo `funding_rate` sin confirmar de GRVT (Hallazgo #8).
+No se exige que los dos campos coincidan para incluir un contrato: eso
+añadiría una restricción sin evidencia que la respalde, en la dirección
+contraria al criterio de "no inventar" — podría esconder una oportunidad
+real basándose en una suposición sin confirmar sobre qué mide `apiAllowed`.
+
+--- Nota sobre contratos inversos/coin-margined (RESUELTO 2026-09-19,
+    auditoría de bugs, Hallazgo #12 — mismo hueco que causó el bug de SOL
+    en KuCoin) ---
+
+La auditoría de bugs (Hallazgo #12) señaló que este conector solo recorta
+el sufijo de la cotización al normalizar el símbolo (`symbol.split("_")[0]`)
+sin ningún equivalente al `isInverse`/`multiplier<0` que se añadió a
+`cex_kucoin.py` tras el bug real de SOLUSDM. Si MEXC lista algún contrato
+margined-en-moneda-base (coin-margined / "Coin-M") junto a uno
+USDT-margined para el mismo activo base, se normalizarían al mismo símbolo
+y, como su fórmula de OI difiere, el número saldría mal en silencio.
+
+**Confirmado que MEXC sí tiene una línea de producto "Coin-M" separada**
+(blog/glosario oficial de MEXC, y una página de trading real para
+`BTC_USD` en `mexc.com/futures/coin-m/BTC_USD`, distinta de `BTC_USDT`).
+La documentación oficial de la API confirma que `/api/v1/contract/detail`
+trae `baseCoin`, `quoteCoin` y `settleCoin` por contrato — campos que solo
+tienen sentido si la API mezcla contratos linear (quote=settle=USDT) e
+inverse (settle en el activo base) en el mismo endpoint bulk.
+
+**Lo que NO se pudo confirmar en vivo**: si `BTC_USD` (u otro contrato
+Coin-M) aparece de verdad en el array de `/api/v1/contract/detail` que
+lee este conector — misma limitación de truncamiento en arrays grandes ya
+documentada varias veces en este proyecto (KuCoin, Lighter, Hallazgo #11):
+solo se pudo ver una porción parcial (~50 de probablemente 1000+
+contratos) con WebFetch, y curl directo está bloqueado por la política de
+red de este sandbox. No hay una fila real observada con
+`settleCoin != quoteCoin`.
+
+**Fix**: se excluyen ENTEROS los contratos donde `settleCoin != quoteCoin`
+(ambos presentes) — mismo criterio que KuCoin con `isInverse`, campo real
+de la API en vez de adivinar por el nombre del símbolo. `quoteCoin`/
+`settleCoin` ausentes NO se tratan como inverso — sin evidencia de que lo
+sean. Se registra un log con los símbolos excluidos si esto llega a pasar
+alguna vez, para poder confirmarlo con datos reales de producción.
 
 --- Nota sobre `collectCycle` (CONFIRMADO en vivo — SÍ varía por símbolo,
     a diferencia del resto de CEX del proyecto) ---
@@ -118,20 +191,85 @@ class MexcConnector:
 
         # symbol -> (contractSize, operable)
         detail_by_symbol: dict[str, tuple[float | None, bool]] = {}
+        # Hallazgo #11 de la auditoría (2026-09-19), ver README/docstring:
+        # diagnóstico de divergencia entre state (confirmado por la doc
+        # oficial como filtro de operable) y apiAllowed (el filtro viejo,
+        # cuyo significado real sigue sin confirmar del todo) -- si algún
+        # día un contrato trae los dos campos en desacuerdo, se registra en
+        # vez de perderse en silencio.
+        state_apiallowed_mismatch: dict[str, dict] = {}
+        # Hallazgo #12 de la auditoría (2026-09-19), ver README/docstring:
+        # contratos inversos/coin-margined ("Coin-M" en MEXC, ej. BTC_USD
+        # frente al BTC_USDT linear que ya cubre este conector) se detectan
+        # con settleCoin != quoteCoin (confirmado por la doc oficial de MEXC
+        # como campos reales del endpoint) -- misma idea que isInverse en
+        # KuCoin. La fórmula de OI (holdVol × contractSize × fairPrice) solo
+        # está confirmada para contratos linear (settleCoin == quoteCoin);
+        # para uno inverso daría un número sin sentido, mismo bug real que
+        # KuCoin ya tuvo con SOLUSDM.
+        inverse_excluded: list[str] = []
         for row in detail_rows:
             if not isinstance(row, dict):
                 continue
             symbol = row.get("symbol")
             if symbol is None:
                 continue
+
+            # Ver docstring (Hallazgo #12): un contrato inverso/coin-margined
+            # se descarta ENTERO -- la fórmula de OI confirmada no aplica, y
+            # no hay (todavía) ningún ejemplo real observado para poder
+            # confirmar la fórmula correcta con evidencia, así que se
+            # excluye en vez de adivinar. quoteCoin/settleCoin ausentes NO
+            # se tratan como inverso -- sin evidencia de que lo sean.
+            quote_coin = row.get("quoteCoin")
+            settle_coin = row.get("settleCoin")
+            if quote_coin is not None and settle_coin is not None and quote_coin != settle_coin:
+                inverse_excluded.append(symbol)
+                continue
+
             contract_size_raw = row.get("contractSize")
             try:
                 contract_size = float(contract_size_raw) if contract_size_raw is not None else None
             except (TypeError, ValueError):
                 contract_size = None
-            # Ver docstring: se usa apiAllowed, no state, como filtro de operable.
-            operable = bool(row.get("apiAllowed"))
+            # Ver docstring: se usa state (confirmado por la doc oficial de
+            # MEXC como el campo de estado de listado, 0=enabled), no
+            # apiAllowed, como filtro de operable. Un state AUSENTE no
+            # descarta el símbolo -- mismo criterio que el resto del
+            # proyecto ("sin evidencia de que esté mal").
+            state_raw = row.get("state")
+            operable = state_raw is None or state_raw == 0
+
+            api_allowed_raw = row.get("apiAllowed")
+            api_allowed = bool(api_allowed_raw)
+            if operable != api_allowed and len(state_apiallowed_mismatch) < 10:
+                state_apiallowed_mismatch[symbol] = {
+                    "state": state_raw,
+                    "apiAllowed": api_allowed_raw,
+                    "operable_segun_state": operable,
+                }
+
             detail_by_symbol[symbol] = (contract_size, operable)
+
+        if inverse_excluded:
+            logger.warning(
+                "mexc: %d contrato(s) inverso(s)/coin-margined excluido(s) por "
+                "settleCoin != quoteCoin (Hallazgo #12 de la auditoría, 2026-09-19 -- ver "
+                "README/docstring, la fórmula de OI confirmada solo aplica a contratos "
+                "linear): %s",
+                len(inverse_excluded),
+                sorted(inverse_excluded),
+            )
+
+        if state_apiallowed_mismatch:
+            logger.warning(
+                "mexc DIAGNÓSTICO state vs apiAllowed (Hallazgo #11 de la auditoría, "
+                "2026-09-19): %d contrato(s) con los dos campos en desacuerdo -- se usó "
+                "'state' (confirmado por la doc oficial como filtro de operable), no "
+                "'apiAllowed'. Muestra: %s",
+                len(state_apiallowed_mismatch),
+                state_apiallowed_mismatch,
+            )
 
         funding_resp = self._session.get(FUNDING_RATE_URL, timeout=self._timeout)
         funding_resp.raise_for_status()

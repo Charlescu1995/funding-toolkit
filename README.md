@@ -1851,6 +1851,111 @@ ticker vacío — el fallo queda aislado a las columnas que de verdad
 dependen de ese endpoint. 46/46 tests pasan en el conjunto completo del
 proyecto tras este cambio, sin regresiones.
 
+## Resuelto (2026-09-19): Hallazgo #11 de la auditoría — MEXC usaba `apiAllowed` en vez de `state` como filtro de operable
+
+`connectors/cex_mexc.py` usaba `apiAllowed` como único filtro de "¿este
+contrato está vivo?" porque su nombre parecía autoexplicativo, dejando sin
+usar el campo `state` porque su mapeo "no estaba documentado" (solo se
+había confirmado un ejemplo en vivo, BTC_USDT, con `state=0`/
+`apiAllowed=true`). La auditoría de bugs (Hallazgo #11) señaló que esto era
+el mismo patrón exacto que el bug real ya arreglado en `dex_extended.py`:
+un campo con nombre prometedor que no es el que de verdad marca
+"delistado".
+
+**Confirmado leyendo la documentación oficial de MEXC**
+(mexcdevelop.github.io/apidocs/contract_v1_en/):
+
+```
+"state": 0, "status, 0:enabled,1:delivery, 2:completed, 3:offline, 4:pause"
+"apiAllowed": bool, "whether support api"
+```
+
+`state` ES el campo de estado de listado — el equivalente exacto al
+`status`/`orderBookState` que ya se usa en KuCoin/Extended/Lighter/etc.
+`apiAllowed`, según la propia doc, es un flag de si la API soporta ese
+contrato, no un estado de listado — y como este proyecto solo lee
+endpoints públicos de solo lectura (no opera vía API), lo relevante es si
+el contrato está listado y operable, no ese flag cuyo alcance exacto la
+doc no termina de aclarar.
+
+**Se intentó confirmar en vivo** si algún contrato real diverge (`state`
+!= 0 con `apiAllowed=true`, o al revés) con dos llamadas WebFetch a
+`/api/v1/contract/detail` — misma limitación de truncamiento en arrays
+grandes ya documentada varias veces en este proyecto (KuCoin, Lighter):
+solo se ve una porción parcial del array (probablemente >1000 contratos),
+y en esa porción todos traían `state=0` y `apiAllowed=true`. No hay, de
+momento, ningún caso real observado donde diverjan — misma situación que
+el campo `funding_rate` sin confirmar de GRVT (Hallazgo #8): el riesgo
+está confirmado por documentación, pero no cazado en producción todavía.
+
+**Fix**: se usa `state == 0` como filtro principal de operable en vez de
+`apiAllowed` — un `state` ausente NO descarta el símbolo (mismo criterio
+de "sin evidencia de que esté mal" ya usado en el resto del proyecto).
+`apiAllowed` se sigue capturando, pero solo para un diagnóstico: si algún
+día un contrato trae los dos campos en desacuerdo, queda registrado en un
+log en vez de perderse en silencio, en vez de exigir que ambos coincidan
+para incluir un contrato — eso habría añadido una restricción sin
+evidencia que la respalde, en la dirección contraria al criterio de "no
+inventar" de este proyecto (podría esconder una oportunidad real basándose
+en una suposición sin confirmar sobre qué mide `apiAllowed`).
+
+**Verificado** con un test nuevo (`test_mexc_state_filter.py`): el caso
+normal (`state=0`) sigue incluido igual que antes; un contrato con `state`
+distinto de 0 (ej. `state=3`, "offline" según la doc) ahora SÍ se excluye,
+aunque `apiAllowed=true` — antes se habría colado sin que nada lo pillara,
+justo el escenario que señalaba el Hallazgo #11; un `state` ausente no se
+descarta; y una divergencia sintética entre `state` y `apiAllowed` se
+resuelve a favor de `state` (confirmado) y queda registrada en el
+diagnóstico nuevo, sin perderse en silencio. 51/51 tests pasan en el
+conjunto completo del proyecto tras este cambio, sin regresiones.
+
+## Resuelto (2026-09-19): Hallazgo #12 de la auditoría — contratos inversos/coin-margined sin detectar en MEXC
+
+`connectors/cex_mexc.py` solo recortaba el sufijo de la cotización al
+normalizar el símbolo (`symbol.split("_")[0]`), sin ningún equivalente al
+`isInverse`/`multiplier<0` que ya tiene `cex_kucoin.py` desde el bug real
+de SOLUSDM. La auditoría de bugs (Hallazgo #12) señaló que era el mismo
+hueco exacto: si MEXC lista algún contrato margined-en-moneda-base
+("Coin-M") junto a uno USDT-margined para el mismo activo base, se
+normalizarían al mismo símbolo y, como su fórmula de OI difiere, el número
+saldría mal en silencio.
+
+**Confirmado que MEXC sí tiene esa línea de producto separada**: su propio
+blog/glosario oficial documenta "Coin-Margined Futures", y existe una
+página de trading real para `BTC_USD` (`mexc.com/futures/coin-m/BTC_USD`),
+distinta de `BTC_USDT`. La documentación oficial de la API confirma
+además que `/api/v1/contract/detail` trae `baseCoin`, `quoteCoin` y
+`settleCoin` por contrato — campos que solo tienen sentido si el endpoint
+mezcla contratos linear (`quote == settle`, USDT) e inverse (`settle` en
+el activo base) en el mismo array bulk.
+
+**Lo que NO se pudo confirmar en vivo**: si un contrato Coin-M (ej.
+`BTC_USD`) aparece de verdad en el array de `/api/v1/contract/detail` que
+lee este conector — misma limitación de truncamiento en arrays grandes ya
+documentada varias veces en este proyecto (KuCoin, Lighter, Hallazgo #11):
+con WebFetch solo se pudo ver una porción parcial (~50 de probablemente
+1000+ contratos), y curl directo está bloqueado por la política de red de
+este sandbox. No hay una fila real observada con `settleCoin != quoteCoin`.
+
+**Fix**: se excluyen ENTEROS los contratos donde `settleCoin != quoteCoin`
+(ambos presentes) — mismo criterio que `isInverse` en KuCoin: un campo
+real de la API, no el nombre del símbolo. `quoteCoin`/`settleCoin`
+ausentes NO se tratan como inverso, sin evidencia de que lo sean. Se
+registra un log con los símbolos excluidos si esto llega a pasar alguna
+vez, para poder confirmarlo con datos reales de producción — igual que el
+resto de guards puramente defensivos de esta sesión (Hallazgos #3, #6).
+
+**Verificado** con un test nuevo (`test_mexc_inverse_guard.py`, con datos
+sintéticos ya que no hay evidencia real observada, mismo criterio que los
+Hallazgos #3 y #6): el caso normal (contrato linear) no se ve afectado; un
+`BTC_USD` coin-margined sintético junto al `BTC_USDT` linear normal se
+excluye ENTERO (no solo pierde OI) y queda registrado en el log nuevo;
+`quoteCoin`/`settleCoin` ausentes no se tratan como inverso; y,
+específicamente, se confirmó que el inverso NO contamina el OI del linear
+del mismo activo base al colisionar en el símbolo normalizado ("BTC") —
+el escenario exacto que señalaba el Hallazgo #12. 55/55 tests pasan en el
+conjunto completo del proyecto tras este cambio, sin regresiones.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

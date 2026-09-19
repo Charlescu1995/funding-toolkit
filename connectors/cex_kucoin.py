@@ -77,6 +77,55 @@ acepta únicamente ese valor exacto, igual que con `orderBookState` en
 Backpack o `trading_status` en Nado, por si existen otros estados (pausado,
 deslistado...) no vistos todavía en este único ejemplo.
 
+--- Nota sobre `openInterest` NEGATIVO (bug real en producción, 2026-09-19,
+    símbolo SOL — investigación abierta, todavía sin causa raíz confirmada)
+    ---
+
+El usuario reportó, dos veces en la misma sesión de trabajo (con ~10-15
+minutos de diferencia), que SOLUSDTM daba un `open_interest_usd` calculado
+imposible: −$616.481.571 la primera vez, −$618.445.974,96 la segunda —
+mismo orden de magnitud, pero NO el mismo valor exacto, así que no es un
+dato congelado/cacheado, es corrupción real y recurrente en vivo. En ambos
+casos el valor negativo acabó descartando la oportunidad del Ranking por
+pura coincidencia (el piso de liquidez mínima — ver más abajo en el README
+— descarta cualquier valor por debajo de $1.000, y cualquier negativo
+cumple eso trivialmente), pero eso tapaba el síntoma sin explicar la causa.
+
+Investigado en vivo (WebFetch, mismo método que el resto de este
+conector): en el momento de la investigación SOLUSDTM venía sano
+(`openInterest="12632439"`, `multiplier=0.1`, `markPrice=113.765` →
+~$143,7M positivo) — la anomalía no es permanente, no se pudo reproducir
+a demanda. Se intentó también un escaneo de TODO el array buscando
+multiplicador/precio negativo en cualquier otro contrato, pero salió
+metodológicamente poco fiable: WebFetch resumió/truncó el array completo
+(confirmado pidiéndole que contara el total: devolvió 36 símbolos de los
+varios cientos que tiene `/contracts/active` en realidad) — así que un
+"no se encontró ningún negativo" de ese escaneo NO es evidencia real de
+nada y se descartó como conclusión.
+
+`kucoinfutures` NO está en `CEX_FACTORY_BY_NAME` (ver
+`connectors/cex_ccxt.py`), así que este valor no pasa por ningún
+enriquecimiento aparte — sale tal cual de la fórmula de abajo
+(`openInterest × multiplier × markPrice`) a partir del mismo payload del
+fetch masivo, sin caché ni historial de por medio. Para que el producto dé
+negativo, al menos uno de esos tres factores tuvo que llegar YA negativo
+desde KuCoin en esa consulta concreta — no hay forma de que nuestro propio
+parseo (conversiones `float()` directas) invierta un signo.
+
+**Mientras no se capture el payload crudo en el momento exacto en que
+esto vuelve a pasar, no hay evidencia suficiente para señalar cuál de los
+tres factores es el culpable** — así que, siguiendo el mismo criterio de
+este proyecto (nunca inventar una causa sin datos reales), NO se intentó
+arreglar el campo concreto. En su lugar: (1) se añadió una guardia que
+descarta a `None` cualquier `open_interest_usd` calculado negativo, en vez
+de dejarlo pasar y depender de la coincidencia del piso de liquidez, y (2)
+se guarda el payload crudo completo (`openInterest`, `multiplier`,
+`markPrice`, tal cual llegaron) de cualquier contrato que dispare esto, en
+un `logger.warning` — para que la PRÓXIMA vez que se repita (y ya van
+dos), el log de despliegue real traiga por fin los tres valores crudos y
+se pueda cerrar esto con una causa confirmada en vez de una guardia
+genérica.
+
 --- Nota sobre `turnoverOf24h` (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
 
 El mismo objeto ya trae el volumen de 24h directamente en USD, sin hacer
@@ -89,6 +138,7 @@ activo base (XBT) y por tanto necesitaría multiplicarse por el precio —
 
 from __future__ import annotations
 
+import json
 import logging
 
 import requests
@@ -130,6 +180,14 @@ class KucoinConnector:
 
         out: list[FundingRate] = []
         skipped: dict[str, str] = {}
+        # Ver docstring más abajo, sección "Nota sobre openInterest negativo":
+        # bug real visto en producción (2026-09-19, símbolo SOL) — el propio
+        # KuCoin devolvió, al menos dos veces, un openInterest*multiplier*
+        # markPrice negativo (físicamente imposible). No tenemos capturado
+        # todavía CUÁL de los tres factores viene mal, así que en vez de
+        # adivinarlo se guarda el payload crudo completo de cualquier
+        # contrato que dé negativo, para verlo en el próximo log real.
+        oi_anomaly_samples: dict[str, dict] = {}
 
         for row in rows:
             if not isinstance(row, dict):
@@ -179,6 +237,21 @@ class KucoinConnector:
                 except (TypeError, ValueError):
                     open_interest_usd = None
 
+                # Ver docstring, "Nota sobre openInterest negativo (bug real,
+                # 2026-09-19)": un OI negativo es físicamente imposible — no
+                # se propaga tal cual (se descarta a None, igual que si no
+                # se hubiera podido calcular), y se guarda el payload crudo
+                # de los tres factores para diagnosticar cuál viene mal.
+                if open_interest_usd is not None and open_interest_usd < 0:
+                    oi_anomaly_samples[raw_symbol] = {
+                        "openInterest_raw": oi_contracts_raw,
+                        "multiplier_raw": multiplier_raw,
+                        "markPrice_raw": mark_price_raw,
+                        "mark_price_calculado": mark_price,
+                        "open_interest_usd_calculado_DESCARTADO": open_interest_usd,
+                    }
+                    open_interest_usd = None
+
             base_currency = row.get("baseCurrency") or raw_symbol
             symbol = _SYMBOL_ALIASES.get(base_currency, base_currency)
 
@@ -219,6 +292,16 @@ class KucoinConnector:
                 len(skipped),
                 len(rows),
                 skipped,
+            )
+
+        if oi_anomaly_samples:
+            logger.warning(
+                "kucoinfutures DIAGNÓSTICO OI negativo (%d contrato(s), ver docstring del módulo — "
+                "openInterest*multiplier*markPrice dio negativo, físicamente imposible, se descartó "
+                "a None en vez de propagarse; payload crudo de los tres factores para averiguar "
+                "cuál viene mal): %s",
+                len(oi_anomaly_samples),
+                json.dumps(oi_anomaly_samples, default=str)[:4000],
             )
 
         return out

@@ -1379,15 +1379,51 @@ regresión con los casos reales B2/TRUST (una sola pierna confirmada y
 baja, con el bottleneck en `None` por la otra pierna sin consultar) más
 el caso real del CSV original (MNT grvt/hyperliquid, OI=$261/Vol=$347),
 Volumen $0 exacto, los bordes del umbral y liquidez sana de control.
-Pendiente de confirmación en producción con un CSV fresco del Ranking
-tras el redespliegue.
+**Confirmado en producción (2026-09-19, tras el redespliegue)**: el
+usuario revisó la tabla del Ranking en vivo tras el fix ("Y en la tabla
+ya está bien") — las filas con una sola pierna confirmada y por debajo de
+$1.000 (el caso B2/TRUST) ya no se cuelan.
 
 De paso, estudiando el mismo CSV aparecieron dos hallazgos más sin
 investigar todavía:
 
-  - **SOL en kucoinfutures muestra OI long = −$616.481.571** (negativo) —
-    imposible físicamente, hay un bug de signo o unidades en ese conector
-    para ese símbolo concreto.
+  - **SOL en kucoinfutures muestra OI long negativo — investigado
+    (2026-09-19), guardia + diagnóstico añadidos, causa raíz aún sin
+    confirmar**: visto dos veces en producción (−$616.481.571 y, ~15 min
+    después, −$618.445.974,96 — mismo orden de magnitud pero no el mismo
+    valor, así que es corrupción recurrente en vivo, no un dato congelado).
+    `kucoinfutures` no pasa por ningún enriquecimiento aparte de OI (no
+    está en `CEX_FACTORY_BY_NAME`), así que el valor sale directo de
+    `openInterest × multiplier × markPrice` en `cex_kucoin.py`, con los
+    tres factores parseados tal cual del mismo payload del fetch masivo —
+    para que el producto dé negativo, KuCoin tuvo que mandar ya negativo
+    alguno de los tres, nuestro parseo (conversiones `float()` directas)
+    no puede invertir un signo. Se confirmó en vivo (WebFetch) que
+    SOLUSDTM viene sano ahora mismo (`openInterest="12632439"`,
+    `multiplier=0.1`, `markPrice=113.765` → ~$143,7M positivo) — no se
+    pudo reproducir a demanda. Se intentó también escanear el array
+    completo de contratos buscando el mismo patrón en otros símbolos, pero
+    salió poco fiable: WebFetch resumió/truncó la respuesta (pedirle el
+    total confirmó que solo veía 36 de varios cientos de contratos reales),
+    así que ese "no se encontró nada" se descartó como conclusión, no se
+    dio por bueno.
+
+    **Sin el payload crudo del momento exacto en que pasa, no hay
+    evidencia para señalar cuál de los tres factores es el culpable** —
+    así que, en vez de adivinarlo, se aplicó el mismo criterio de siempre
+    en este proyecto (evidencia antes que arreglo): (1) guardia en
+    `cex_kucoin.py` que descarta a `None` cualquier `open_interest_usd`
+    calculado negativo, en vez de dejarlo pasar dependiendo por
+    coincidencia de que el piso de liquidez lo cace, y (2)
+    `logger.warning` con el payload crudo completo (`openInterest`,
+    `multiplier`, `markPrice`) de cualquier contrato que dispare esto, para
+    que el PRÓXIMO despliegue en el que se repita traiga por fin los tres
+    valores crudos en el log y se pueda cerrar con causa confirmada.
+    Test de regresión sintético (`test_kucoin_negative_oi_guard.py`, no
+    afirma la causa real, solo prueba que la guardia y el log funcionan
+    sea cual sea el factor que venga mal) + caso de control con los valores
+    sanos reales de SOLUSDTM confirmados en vivo. **Pendiente**: que
+    vuelva a pasar con el fix desplegado, y pegar el log de ese momento.
   - **Las 47 filas donde participa GRVT muestran las 47 exactamente
     "+0.0%" de funding**, incluyendo activos muy líquidos (LINK, ADA, AVAX,
     UNI, AAVE, ARB, JUP, con Cuello de botella OI de cientos de miles de

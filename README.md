@@ -1559,6 +1559,75 @@ conectores, y un OI negativo sintético (precio/valor anómalo) se descarta
 a `None` y queda registrado en el log en ambos. 22/22 tests pasan en el
 conjunto completo del proyecto tras este cambio, sin regresiones.
 
+## Resuelto (2026-09-19): Hallazgos #4 y #5 de la auditoría — `cex_ccxt.py`
+
+Ambos en el mismo módulo (`connectors/cex_ccxt.py`), resueltos a la vez.
+
+**Hallazgo #4 — `next_funding_time` guardaba un string, no un `datetime`.**
+`FundingRate.next_funding_time` está tipado `Optional[datetime]`
+(`connectors/base.py`), pero `cex_ccxt.py` le asignaba directamente
+`entry.get("fundingDatetime")` — el string ISO8601 crudo que da ccxt (ej.
+`"2026-09-19T08:00:00.000Z"`), sin convertir. Confirmado con `grep` que hoy
+es inerte de verdad: ningún archivo de `core/` ni de `pages/` lee este
+campo, y ni siquiera `core/normalize.py` lo traslada a `NormalizedRate`
+(no existe ahí). No rompe nada hoy, pero es un bug latente — si algún día
+se usa (ej. para mostrar cuándo liquida cada oportunidad), se rompería con
+un string donde se espera un objeto `datetime`.
+
+**Fix**: se convierte con el propio parser ISO8601 de ccxt
+(`self._client.parse8601(...)`, el mismo que ccxt usa internamente para
+construir `fundingDatetime` a partir del timestamp en ms — no se reinventa
+el parseo) a un `datetime` real, timezone-aware en UTC. Si el campo falta
+o no se puede parsear, se guarda `None` en vez de lanzar una excepción o
+propagar basura.
+
+**Hallazgo #5 — intervalo fijo de 8h para 6 exchanges, sin usar el dato
+real cuando ccxt SÍ lo trae.** `DEFAULT_INTERVAL_HOURS` asumía 8h fijas
+para binance/bybit/okx/bitget/gate/aster, con un comentario propio del
+código reconociéndolo como aproximación pendiente de refinar. Antes de
+tocar nada se confirmó **leyendo el código fuente de ccxt instalado en
+este entorno** (versión 4.5.76, método `parse_funding_rate()` de cada
+exchange) en vez de asumir:
+
+  - `binance`/`bybit`/`okx`/`gate`/`aster`: **SÍ** rellenan una clave
+    `'interval'` (string tipo `"8h"`, `"4h"`, `"16h"`...) en cada fila de
+    `fetch_funding_rates()`, calculada por ccxt a partir de un dato real
+    del exchange por símbolo (`fundingIntervalHours` en binance/aster,
+    `fundingInterval` de la metadata de mercado en bybit, la diferencia
+    `nextFundingTime − fundingTime` en okx, `funding_interval` en gate).
+  - `bitget` es la excepción confirmada: su `fetch_funding_rates()` usa
+    por defecto el endpoint `publicMixGetV2MixMarketTickers`, cuya
+    respuesta bulk (confirmado leyendo el propio docstring de
+    `parse_funding_rate()` en `bitget.py`) NO incluye `ratePeriod`/
+    `fundingRateInterval` — ese campo solo lo trae el endpoint alternativo
+    de `fetchFundingInterval`, que este conector no llama. Así que para
+    bitget seguirá cayendo siempre al valor fijo (8h) con el código
+    actual — no es un descuido, es el límite real de la llamada que
+    hacemos hoy.
+
+**Fix**: se lee `entry.get("interval")` de cada fila y, si viene con un
+valor válido (parseado con una regex tolerante, nunca lanza), se usa
+DIRECTAMENTE como `interval_hours` de esa fila — el diccionario fijo pasa
+a ser solo el fallback para cuando el campo no viene (bitget siempre, y
+cualquier símbolo de los otros cinco donde ccxt tampoco lo traiga). Se
+añadió un log de diagnóstico por exchange (`%s: intervalo real de ccxt
+usado en %d/%d símbolos...`) para confirmar en producción cuántos
+símbolos de cada exchange usan de verdad el dato real frente al fallback.
+
+**Verificado** con un test nuevo
+(`test_ccxt_interval_and_next_funding.py`) usando una instancia REAL de
+`ccxt.binanceusdm()` (sin red — solo se sustituyen
+`fetch_funding_rates()`/`fetch_tickers()`/`markets`, dejando
+`parse8601()` como el método real de ccxt, no un mock) con payloads
+sintéticos que replican el formato exacto confirmado en el código fuente:
+intervalo real (`"4h"`) sustituye al fijo, intervalo ausente cae al fijo,
+valores de `interval` inválidos (`None`, string vacío, no numérico, tipo
+incorrecto) caen al fallback sin lanzar excepción, `fundingDatetime`
+válido produce un `datetime` real timezone-aware con el valor correcto, y
+`fundingDatetime` ausente o no parseable da `None` sin excepción. 28/28
+tests pasan en el conjunto completo del proyecto tras este cambio, sin
+regresiones.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

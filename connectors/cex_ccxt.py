@@ -14,6 +14,8 @@ de CEX con poco código propio.
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime, timezone
 
 import ccxt
 
@@ -24,11 +26,28 @@ from .cex_mexc import mexc
 
 logger = logging.getLogger(__name__)
 
-# Intervalo de liquidación por defecto de cada CEX, en horas.
-# ccxt no siempre expone el intervalo real por símbolo (algunos exchanges lo
-# variaron por par en 2024-2025), así que partimos del intervalo "clásico" del
-# exchange y lo iremos refinando por símbolo en el Paso 3 (normalización) si
-# ccxt trae el dato (`fundingInterval` o similar) en la respuesta cruda.
+# Intervalo de liquidación por defecto de cada CEX, en horas — SOLO se usa
+# como fallback cuando ccxt no trae un intervalo real por símbolo en la
+# respuesta de fetch_funding_rates() (ver _parse_interval_hours() más abajo,
+# arreglado en la auditoría de bugs, Hallazgo #5, 2026-09-19).
+#
+# CONFIRMADO leyendo el código fuente de ccxt instalado (4.5.76,
+# parse_funding_rate() de cada exchange): binance, bybit, okx, gate y aster
+# SÍ rellenan una clave 'interval' (string tipo "8h", "4h"...) en cada fila
+# de fetch_funding_rates(), calculada por ccxt a partir del dato real del
+# exchange (fundingIntervalHours en binance/aster, fundingInterval en
+# bybit —desde la metadata de mercado—, la diferencia entre fundingTime/
+# nextFundingTime en okx, funding_interval en gate). Cuando esa clave viene
+# con un valor válido, se usa DIRECTAMENTE en vez de este diccionario fijo.
+#
+# bitget es la EXCEPCIÓN confirmada: su fetch_funding_rates() usa por
+# defecto el endpoint publicMixGetV2MixMarketTickers, cuya respuesta bulk
+# (ver docstring de parse_funding_rate() en bitget.py) NO incluye
+# ratePeriod/fundingRateInterval — solo lo trae el endpoint alternativo de
+# fetchFundingInterval (publicMixGetV2MixMarketCurrentFundRate), que este
+# conector no llama. Así que para bitget 'interval' siempre sale None con
+# el código actual y se sigue usando este valor fijo — no es un descuido,
+# es el límite real de la llamada que hacemos.
 DEFAULT_INTERVAL_HOURS = {
     "binance": 8,
     "binanceusdm": 8,
@@ -48,6 +67,33 @@ DEFAULT_INTERVAL_HOURS = {
     # valor por defecto del exchange, sin refinar por símbolo.
     "aster": 8,
 }
+
+
+# Ver DEFAULT_INTERVAL_HOURS arriba (Hallazgo #5 de la auditoría,
+# 2026-09-19): formato confirmado leyendo ccxt (binance/bybit/okx/gate/aster
+# usan siempre un entero + "h" literal, ej. "8h", "4h", "16h", "24h" — nunca
+# fracciones de hora). Se parsea con regex en vez de asumir que siempre
+# termina en "h" a pelo, por si algún exchange devuelve el número solo.
+_INTERVAL_STRING_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*h?\s*$", re.IGNORECASE)
+
+
+def _parse_interval_hours(raw_interval: object) -> float | None:
+    """Convierte el campo 'interval' de ccxt (ej. "8h") a horas (8.0).
+
+    Devuelve None si el campo no vino, no es un string, o no matchea el
+    formato esperado — nunca lanza, para no tirar toda la fila por un campo
+    que en la práctica es solo un refinamiento sobre el valor por defecto.
+    """
+    if not isinstance(raw_interval, str):
+        return None
+    match = _INTERVAL_STRING_RE.match(raw_interval)
+    if match is None:
+        return None
+    try:
+        hours = float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return hours if hours > 0 else None
 
 
 class CexConnector:
@@ -132,6 +178,13 @@ class CexConnector:
         interval_default = DEFAULT_INTERVAL_HOURS.get(self.ccxt_id, 8)
         out: list[FundingRate] = []
         ghost_symbols: list[str] = []
+        # Ver Hallazgo #5 de la auditoría: cuántos símbolos usaron el
+        # intervalo real de ccxt frente a los que cayeron al valor fijo de
+        # DEFAULT_INTERVAL_HOURS por no venir el campo — diagnóstico simple
+        # para confirmar en producción que el refinamiento por símbolo
+        # funciona de verdad (o que, como bitget, nunca dispara).
+        interval_real_count = 0
+        interval_fallback_count = 0
 
         for market_symbol, entry in raw.items():
             if not market_symbol.endswith(f":{self.quote}") and f"/{self.quote}" not in market_symbol:
@@ -163,7 +216,42 @@ class CexConnector:
                 continue
 
             base = entry.get("symbol", market_symbol).split("/")[0]
-            next_funding = entry.get("fundingDatetime")
+
+            # Ver Hallazgo #5 de la auditoría (2026-09-19): usar el
+            # intervalo real por símbolo que ccxt ya calcula (campo
+            # 'interval', ej. "8h") cuando viene, en vez de asumir siempre
+            # el valor fijo del exchange — confirmado leyendo el código
+            # fuente de ccxt que binance/bybit/okx/gate/aster SÍ lo
+            # rellenan con el dato real (bitget no, ver DEFAULT_INTERVAL_HOURS).
+            interval_real = _parse_interval_hours(entry.get("interval"))
+            if interval_real is not None:
+                interval_hours = interval_real
+                interval_real_count += 1
+            else:
+                interval_hours = interval_default
+                interval_fallback_count += 1
+
+            # Ver Hallazgo #4 de la auditoría (2026-09-19): FundingRate.next_funding_time
+            # está tipado Optional[datetime] (connectors/base.py) pero aquí se
+            # guardaba el string ISO8601 crudo de ccxt (fundingDatetime) tal
+            # cual, sin convertir — inerte hoy (ningún consumidor del
+            # pipeline lee este campo, ni siquiera core/normalize.py lo
+            # traslada a NormalizedRate, confirmado con grep), pero un campo
+            # mal tipado es un bug latente si algún día se usa. Se convierte
+            # con el propio parser ISO8601 de ccxt (Exchange.parse8601, el
+            # mismo que usa internamente para construir 'fundingDatetime' a
+            # partir del timestamp en ms) para no reinventar el parseo.
+            next_funding_raw = entry.get("fundingDatetime")
+            next_funding_time = None
+            if next_funding_raw is not None:
+                try:
+                    next_funding_ms = self._client.parse8601(next_funding_raw)
+                except (TypeError, ValueError):
+                    next_funding_ms = None
+                if next_funding_ms is not None:
+                    next_funding_time = datetime.fromtimestamp(
+                        next_funding_ms / 1000, tz=timezone.utc
+                    )
 
             out.append(
                 FundingRate(
@@ -172,9 +260,9 @@ class CexConnector:
                     symbol=base,
                     raw_symbol=market_symbol,
                     funding_rate=float(rate),
-                    interval_hours=interval_default,
+                    interval_hours=interval_hours,
                     mark_price=entry.get("markPrice"),
-                    next_funding_time=next_funding,
+                    next_funding_time=next_funding_time,
                     open_interest_usd=None,  # ccxt no lo trae en fetch_funding_rates; se añade en Paso 5
                     volume_24h_usd=volume_by_symbol.get(market_symbol),
                 )
@@ -190,6 +278,18 @@ class CexConnector:
                 self.ccxt_id,
                 len(ghost_symbols),
                 ghost_symbols[:10],
+            )
+
+        if interval_real_count or interval_fallback_count:
+            logger.info(
+                "%s: intervalo real de ccxt usado en %d/%d símbolos (Hallazgo #5 de la "
+                "auditoría); %d cayeron al valor fijo DEFAULT_INTERVAL_HOURS=%sh por no "
+                "traer el campo 'interval' (normal en bitget, ver docstring del módulo)",
+                self.ccxt_id,
+                interval_real_count,
+                interval_real_count + interval_fallback_count,
+                interval_fallback_count,
+                interval_default,
             )
 
         return out

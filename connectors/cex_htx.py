@@ -102,6 +102,19 @@ esperado) y un `contract_code` que no aparece EN ABSOLUTO en
 `swap_contract_info`. El segundo caso caía por el mismo default y se perdía
 sin pasar nunca por `skipped`. Ahora se distingue: un `contract_code`
 ausente de la metadata se registra en `skipped` explícitamente.
+
+**Confirmado en el primer despliegue real de este diagnóstico (2026-09-19)**:
+salieron 4 `contract_code` ausentes -- ETH-USDT-260925, BTC-USDT-261002,
+BTC-USDT-260925, ETH-USDT-261002. El sufijo con fecha (AAMMDD) delata que
+son contratos de FUTUROS CON VENCIMIENTO FIJO (trimestrales), no
+perpetuos -- `swap_contract_info` documenta la metadata de los swaps
+PERPETUOS, así que es coherente y esperado que no los conozca. A diferencia
+del caso de `cex_mexc.py` (donde parte de las ausencias eran contratos ya
+excluidos a propósito por otro motivo, ver su docstring), aquí no hace
+falta ningún filtro adicional: `swap_batch_funding_rate` simplemente mezcla
+perpetuos y futuros con vencimiento en la misma respuesta, y el filtro por
+metadata de perpetuos ya los descarta correctamente -- este diagnóstico solo
+lo hace VISIBLE en vez de silencioso, no cambia qué se descarta.
 """
 
 from __future__ import annotations

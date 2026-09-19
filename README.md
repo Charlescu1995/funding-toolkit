@@ -2179,6 +2179,34 @@ bug incidental de Hyperliquid) y `test_finding_18_missing_from_metadata.py`
 sigue en silencio, para MEXC y HTX). 98/98 tests pasan en el conjunto
 completo del proyecto tras este cambio, sin regresiones.
 
+**Corrección tras el primer despliegue real de este fix (2026-09-19)**: el
+primer log de producción con el diagnóstico del Hallazgo #18 activo mostró
+que SÍ está capturando casos reales — 18 símbolos en MEXC, 4 contract_code
+en HTX — pero reveló una interacción no prevista: en MEXC, 10 de esos 18
+eran justo los MISMOS contratos inversos/coin-margined que el Hallazgo #12
+ya excluye a propósito (BTC_USD, ETH_USD, XRP_USD, SOL_USD, SUI_USD,
+ADA_USD, DOGE_USD, AVAX_USD, LTC_USD, LINK_USD) — como se excluyen ANTES de
+entrar a `detail_by_symbol`, también "estaban ausentes" según el chequeo
+del #18, y salían DOS VECES en el log con mensajes contradictorios (una vez
+"excluido por inverso", otra "ausente sin explicación"). **Fix**: el
+chequeo del #18 ahora consulta primero el conjunto de inversos ya
+excluidos y no los vuelve a registrar. Los 8 símbolos restantes de ese
+mismo log (USDGO_USDT, MX_USDT, USDE_USDT, WBTC_USDT, STETH_USDT,
+MXSOL_USDT, TON_USDT, USD1_USDT) sí eran el caso real que el hallazgo
+pretendía capturar y siguen reportándose con normalidad. En HTX, los 4
+`contract_code` ausentes (ETH-USDT-260925, BTC-USDT-261002,
+BTC-USDT-260925, ETH-USDT-261002) resultaron ser contratos de FUTUROS con
+vencimiento fijo (trimestrales, por el sufijo con fecha) mezclados en el
+mismo feed de funding que los perpetuos — `swap_contract_info` documenta
+solo perpetuos, así que es coherente y esperado que no los conozca; no hizo
+falta ningún cambio de código ahí, solo se documentó la evidencia real en
+el docstring del módulo.
+
+Verificado con 2 tests nuevos en `test_finding_18_missing_from_metadata.py`
+(un inverso ya excluido no se duplica en el log; un símbolo genuinamente
+sin explicación conocida se sigue reportando). 107/107 tests pasan en el
+conjunto completo del proyecto, sin regresiones.
+
 ## Resuelto (2026-09-19): Hallazgos #19, #20, #21 y #22 de la auditoría — los cuatro de severidad baja/cosmética
 
 Se continuó con "Seguimos con 19,20,21 y 22. Dejamos el 17 de momento" — el

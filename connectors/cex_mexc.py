@@ -184,6 +184,26 @@ pasar nunca por `skipped`, a diferencia de cada otro motivo de descarte en
 esta misma función. Ahora se distingue explícitamente: un símbolo ausente
 de `contract/detail` se registra en `skipped` (y por tanto aparece en el
 log), el caso "presente pero no operable" sigue igual que siempre.
+
+**Corrección tras el primer despliegue real de este fix (2026-09-19)**: el
+primer log de producción con este diagnóstico activo mostró 18 símbolos
+"ausentes de metadata", pero 10 de ellos (BTC_USD, ETH_USD, XRP_USD,
+SOL_USD, SUI_USD, ADA_USD, DOGE_USD, AVAX_USD, LTC_USD, LINK_USD) eran
+justo los MISMOS 10 contratos que el propio conector ya excluye a
+propósito por ser inversos/coin-margined (Hallazgo #12, ver nota más arriba
+y `inverse_excluded`) -- estos NUNCA se añaden a `detail_by_symbol` porque
+se descartan en la primera pasada, así que también caían por el chequeo
+"ausente" de este hallazgo, apareciendo DOS VECES en el log con mensajes
+contradictorios: una vez explicados ("excluido por inverso") y otra vez
+como si no se supiera por qué faltaban ("no se pudo confirmar si es
+operable"). **Fix**: se guarda `inverse_excluded` como conjunto
+(`inverse_excluded_set`) y el chequeo de este hallazgo ahora lo consulta
+primero -- un inverso ya excluido no se vuelve a registrar aquí. Los 8
+símbolos restantes de ese mismo log (USDGO_USDT, MX_USDT, USDE_USDT,
+WBTC_USDT, STETH_USDT, MXSOL_USDT, TON_USDT, USD1_USDT) SÍ son el caso real
+que este hallazgo pretendía capturar -- ausentes de `contract/detail` sin
+ninguna explicación conocida (posible desfase de listado entre los dos
+endpoints) -- y siguen registrándose con normalidad.
 """
 
 from __future__ import annotations
@@ -285,6 +305,11 @@ class MexcConnector:
 
             detail_by_symbol[symbol] = (contract_size, operable)
 
+        # Ver Hallazgo #18 más abajo: para poder distinguir "ausente de
+        # detail_by_symbol porque es un inverso ya excluido a propósito" de
+        # "ausente sin ninguna explicación conocida".
+        inverse_excluded_set = set(inverse_excluded)
+
         if inverse_excluded:
             logger.warning(
                 "mexc: %d contrato(s) inverso(s)/coin-margined excluido(s) por "
@@ -381,6 +406,21 @@ class MexcConnector:
             # perdía sin aparecer nunca en `skipped`, indistinguible de un
             # descarte esperado. Ahora se registra explícitamente.
             if symbol not in detail_by_symbol:
+                # RESUELTO tras el primer despliegue real de este fix
+                # (2026-09-19): un contrato inverso/coin-margined (Hallazgo
+                # #12) también cae por este `not in` -- se excluye A
+                # PROPÓSITO de detail_by_symbol más arriba, así que "ausente"
+                # es exactamente lo esperado para él, no un caso misterioso.
+                # Sin esta distinción, los mismos símbolos salían DOS veces
+                # en el log con mensajes contradictorios: una vez explicados
+                # como "inverso, excluido a propósito" y otra vez como
+                # "ausente sin explicación" -- confirmado en el primer log de
+                # producción (BTC_USD, ETH_USD, XRP_USD... aparecían en
+                # ambos). Ahora un inverso conocido no vuelve a registrarse
+                # aquí; el resto (genuinely ausente, sin explicación conocida
+                # -- ej. USDE_USDT, WBTC_USDT vistos en producción) sí.
+                if symbol in inverse_excluded_set:
+                    continue
                 skipped[symbol] = (
                     "Hallazgo #18: presente en funding_rate pero ausente en "
                     "contract/detail (metadata) -- no se pudo confirmar si es operable"

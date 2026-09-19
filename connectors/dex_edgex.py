@@ -78,6 +78,20 @@ deja `volume_24h_usd=None` para todos los pares de edgeX, sin inventar un
 valor ni hacer peticiones símbolo a símbolo para conseguirlo. Si en el
 futuro `getTicker` empieza a devolver datos reales, se puede retomar este
 punto usando su campo `"value"` directamente (ya en USD, sin conversión).
+
+--- Nota sobre Hallazgo #16 de la auditoría (2026-09-19, RESUELTO) ---
+
+`fundingRate`, `markPrice` y `fundingRateIntervalMin` se convertían con
+`float()` sin try/except en ningún caso -- este conector no tenía NINGUNA
+de las tres protegidas (a diferencia de otros conectores del mismo
+hallazgo, donde al menos mark_price/OI ya estaban protegidos por el fix
+del Hallazgo #13). Como esto corre en el hilo principal (tras
+`future.result()`, dentro del bucle `as_completed`), un solo contrato con
+un valor no numérico tiraba el conector ENTERO, no solo ese contrato. Ahora:
+un `fundingRate` no numérico descarta el contrato (sin funding no hay nada
+que publicar); un `markPrice`/`fundingRateIntervalMin` no numérico solo
+descarta ese campo concreto (mark_price queda `None`, interval_hours cae al
+`FALLBACK_INTERVAL_HOURS`), el contrato se sigue publicando.
 """
 
 from __future__ import annotations
@@ -154,6 +168,13 @@ class EdgeXConnector:
 
         out: list[FundingRate] = []
         errors: dict[str, str] = {}
+        # Ver Hallazgo #16 de la auditoría (2026-09-19): mark_price,
+        # interval_hours y funding_rate se convertían sin try/except -- un
+        # solo contrato con un valor no numérico tiraba el conector ENTERO.
+        # Esto corre en el hilo principal (tras future.result(), dentro del
+        # bucle as_completed), así que la excepción se escapaba del bucle
+        # entero, no solo de ese contrato.
+        non_numeric_samples: dict[str, dict] = {}
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             future_to_contract = {
@@ -175,13 +196,33 @@ class EdgeXConnector:
                 if rate is None:
                     continue
 
+                try:
+                    funding_rate_value = float(rate)
+                except (TypeError, ValueError):
+                    if len(non_numeric_samples) < 6:
+                        non_numeric_samples[contract_name] = {"fundingRate_raw": rate}
+                    continue
+
                 mark_price_raw = row.get("markPrice")
-                mark_price = float(mark_price_raw) if mark_price_raw is not None else None
+                mark_price = None
+                if mark_price_raw is not None:
+                    try:
+                        mark_price = float(mark_price_raw)
+                    except (TypeError, ValueError):
+                        mark_price = None
+                        if len(non_numeric_samples) < 6:
+                            non_numeric_samples.setdefault(contract_name, {})["markPrice_raw"] = mark_price_raw
 
                 interval_min = row.get("fundingRateIntervalMin")
-                interval_hours = (
-                    float(interval_min) / 60.0 if interval_min is not None else FALLBACK_INTERVAL_HOURS
-                )
+                interval_hours = FALLBACK_INTERVAL_HOURS
+                if interval_min is not None:
+                    try:
+                        interval_hours = float(interval_min) / 60.0
+                    except (TypeError, ValueError):
+                        if len(non_numeric_samples) < 6:
+                            non_numeric_samples.setdefault(contract_name, {})[
+                                "fundingRateIntervalMin_raw"
+                            ] = interval_min
 
                 symbol = _strip_quote_suffix(contract_name)
 
@@ -191,7 +232,7 @@ class EdgeXConnector:
                         venue_type=VenueType.DEX,
                         symbol=symbol,
                         raw_symbol=contract_name,
-                        funding_rate=float(rate),
+                        funding_rate=funding_rate_value,
                         interval_hours=interval_hours,
                         mark_price=mark_price,
                         next_funding_time=None,
@@ -216,6 +257,17 @@ class EdgeXConnector:
                 len(errors),
                 len(contracts),
                 errors,
+            )
+
+        if non_numeric_samples:
+            logger.warning(
+                "edgex DIAGNÓSTICO valor no numérico (Hallazgo #16 de la auditoría, 2026-09-19): "
+                "%d contrato(s) con fundingRate/markPrice/fundingRateIntervalMin no numérico -- "
+                "un fundingRate no numérico descarta el contrato entero, markPrice/interval no "
+                "numérico solo cae al valor por defecto correspondiente. Antes de este fix, "
+                "cualquiera de estos habría tirado el conector ENTERO: %s",
+                len(non_numeric_samples),
+                non_numeric_samples,
             )
 
         return out

@@ -23,6 +23,23 @@ que `funding`, `markPx` y `openInterest` que este conector ya usa del mismo
 objeto. Se usa directamente:
 
     volume_24h_usd = float(ctx["dayNtlVlm"])
+
+--- Nota sobre Hallazgo #16 de la auditoría (2026-09-19, RESUELTO) ---
+
+Dos problemas reales encontrados al estudiarlo:
+
+  - `float(funding)` no tenía try/except -- un solo activo con un valor no
+    numérico en `funding` tiraba el conector ENTERO (sin excepción alguna
+    capturada en ningún sitio de esta función). Ahora se descarta solo ese
+    símbolo y se registra en diagnóstico.
+  - `mark_price` se convertía DOS VECES por separado: una vez protegida
+    (`mark_price_val`, solo para el cálculo de OI) y otra sin proteger,
+    directamente en el campo `FundingRate.mark_price` de más abajo -- y de
+    paso, esa segunda conversión ignoraba el guard de `mark_price == 0` del
+    Hallazgo #13, así que un markPx explícito de 0 sí se publicaba como
+    precio (aunque no se usara para calcular OI). Ahora hay una sola
+    conversión protegida y su resultado (ya sin el caso `== 0`) se usa para
+    ambas cosas.
 """
 
 from __future__ import annotations
@@ -69,6 +86,14 @@ class HyperliquidConnector:
         # markPx de 0 explícito no se multiplica (daría oi_usd=0.0 en
         # silencio), se descarta y se guarda una muestra de diagnóstico.
         zero_mark_price_samples: dict[str, object] = {}
+        # Ver Hallazgo #16 de la auditoría (2026-09-19): `funding` no tenía
+        # try/except (un solo activo con valor no numérico tiraba el
+        # conector ENTERO), y `mark_price` se recalculaba una SEGUNDA vez
+        # sin protección (línea que rellena FundingRate.mark_price) aparte
+        # del `mark_price_val` de arriba, que solo protegía el cálculo de
+        # OI -- las dos conversiones duplicadas ahora comparten el mismo
+        # valor ya protegido, en vez de reconvertir por separado.
+        non_numeric_samples: dict[str, dict] = {}
 
         for asset, ctx in zip(universe, asset_ctxs):
             symbol = asset.get("name")
@@ -76,21 +101,38 @@ class HyperliquidConnector:
             if symbol is None or funding is None:
                 continue
 
+            try:
+                funding_rate_value = float(funding)
+            except (TypeError, ValueError):
+                if len(non_numeric_samples) < 6:
+                    non_numeric_samples[symbol] = {"funding_raw": funding}
+                continue
+
             mark_price = ctx.get("markPx")
-            open_interest = ctx.get("openInterest")
-            oi_usd = None
-            if open_interest is not None and mark_price is not None:
+            mark_price_val = None
+            if mark_price is not None:
                 try:
                     mark_price_val = float(mark_price)
                 except (TypeError, ValueError):
                     mark_price_val = None
+                    if len(non_numeric_samples) < 6:
+                        non_numeric_samples.setdefault(symbol, {})["markPx_raw"] = mark_price
+
+            open_interest = ctx.get("openInterest")
+            oi_usd = None
+            if open_interest is not None and mark_price_val is not None:
                 if mark_price_val == 0:
                     zero_mark_price_samples[symbol] = mark_price
-                elif mark_price_val is not None:
+                else:
                     try:
                         oi_usd = float(open_interest) * mark_price_val
                     except (TypeError, ValueError):
                         oi_usd = None
+
+            # mark_price_val ya es 0 en vez de None cuando markPx llegó como
+            # 0 explícito -- se descarta igual que en el resto del proyecto
+            # (Hallazgo #13), no se publica un precio de 0.
+            mark_price_final = None if mark_price_val == 0 else mark_price_val
 
             # Ver docstring: dayNtlVlm ya viene en USD, sin conversión.
             day_ntl_vlm = ctx.get("dayNtlVlm")
@@ -107,9 +149,9 @@ class HyperliquidConnector:
                     venue_type=VenueType.DEX,
                     symbol=symbol,
                     raw_symbol=symbol,
-                    funding_rate=float(funding),
+                    funding_rate=funding_rate_value,
                     interval_hours=INTERVAL_HOURS,
-                    mark_price=float(mark_price) if mark_price is not None else None,
+                    mark_price=mark_price_final,
                     next_funding_time=self._next_hour_utc(),
                     open_interest_usd=oi_usd,
                     volume_24h_usd=volume_24h_usd,
@@ -123,6 +165,17 @@ class HyperliquidConnector:
                 "(habría dado 0.0 en silencio): %s",
                 len(zero_mark_price_samples),
                 zero_mark_price_samples,
+            )
+
+        if non_numeric_samples:
+            logger.warning(
+                "hyperliquid DIAGNÓSTICO funding/markPx no numérico (Hallazgo #16 de la "
+                "auditoría, 2026-09-19): %d símbolo(s) afectado(s) -- un funding no numérico "
+                "descarta el símbolo entero; un markPx no numérico solo descarta el precio "
+                "(el símbolo se sigue publicando sin mark_price/OI). Antes de este fix, un "
+                "funding no numérico habría tirado el conector ENTERO: %s",
+                len(non_numeric_samples),
+                non_numeric_samples,
             )
 
         return out

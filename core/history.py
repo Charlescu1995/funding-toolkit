@@ -103,7 +103,16 @@ def historical_apr(
     expected = max(1, int((window_hours * 60) / SNAPSHOT_INTERVAL_MIN))
     enough = count >= expected * MIN_SNAPSHOTS_FRACTION
 
-    return WindowStat(apr_avg=avg if enough else avg, samples=count, enough_history=enough)
+    # Ver Hallazgo #19 de la auditoría (2026-09-19, RESUELTO): las dos ramas
+    # de este if/else eran idénticas (`avg if enough else avg`), así que
+    # `apr_avg` nunca llegaba a ser `None` aunque el propio campo está
+    # documentado como "None si no hay histórico suficiente" (ver
+    # WindowStat más arriba). Inofensivo hasta ahora porque los dos sitios
+    # que leen este campo (pages/1_Funding_Rates.py, cli.py) ya comprueban
+    # `enough_history` por su cuenta antes de usar `apr_avg` -- pero es una
+    # trampa para cualquier código futuro que confíe en la documentación
+    # del campo sin volver a comprobar `enough_history`.
+    return WindowStat(apr_avg=avg if enough else None, samples=count, enough_history=enough)
 
 
 def historical_apr_all_windows(

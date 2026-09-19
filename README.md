@@ -2073,6 +2073,169 @@ visibilidad de logging" que ya se había marcado como futurible en una
 sesión anterior, ahora con una causa raíz concreta identificada
 (`logging.basicConfig()` nunca se llama) en vez de solo la sospecha.
 
+**Actualización (2026-09-19, Hallazgo #14 confirmado con datos REALES de
+producción, tercer despliegue)**: con el fix de logging ya corregido, el
+diagnóstico `paradex DIAGNÓSTICO escala de funding_rate` apareció en el log
+real de Streamlit Cloud, repetido en varios ciclos de refresco. Muestras
+reales de `funding_rate` crudo: SUI-USD-PERP y ETH-USD-PERP ~0.0001;
+NG/MRVL/VVV/kSHIB/XPT/NEAR/PUMP/ETHFI/PYTH/XPL-USD-PERP entre ~0.00003 y
+~0.0001; BZ-USD-PERP ~0.000037; XAU-USD-PERP y US100-USD-PERP exactamente
+0.00005 en los 3 ciclos muestreados (consistente con un funding-rate
+mínimo/floor propio de mercados de índice/materia prima, no con un
+problema de escala). Todas estas magnitudes son del orden de 0.003%-0.01%
+por periodo de 8h, coincidiendo con la interpretación sin escalar (la que
+ya usa el código) y descartando la lectura "número en porcentaje" que
+sugería el ejemplo `"funding_rate": "0.3"` de la documentación de
+referencia — confirma que ese "0.3" era en efecto el placeholder
+autogenerado que se sospechaba. **Hallazgo #14 pasa de SOSPECHOSO a
+CONFIRMADO. No hizo falta ningún cambio de fórmula** — el código ya hacía
+lo correcto; solo se actualizó el docstring de `dex_paradex.py` con la
+evidencia real. El log de diagnóstico se deja tal cual, como registro
+histórico de la confirmación (mismo criterio que con los Hallazgos
+#11/#12).
+
+Hallazgo #15 (Vertex) sigue SOSPECHOSO — Vertex continúa bloqueado por
+`ssl.SSLEOFError` antes de llegar a generar su diagnóstico, así que
+todavía no hay datos reales que lo confirmen o lo descarten.
+
+## Resuelto (2026-09-19): Hallazgos #16 y #18 de la auditoría — conversiones `float()` sin proteger en 7 conectores DEX, y símbolos que se perdían en silencio en MEXC/HTX
+
+Se estudiaron los Hallazgos #16, #17 y #18 juntos (petición explícita del
+usuario: "Vamos a ver 16, 17 y 18"), y se implementaron el #16 y el #18 tras
+su aprobación — el #17 se sacó del lote a petición del usuario ("Quita de
+momento la 17") y queda pendiente, sin tocar, para más adelante.
+
+**Hallazgo #16 (CONFIRMADO, y peor de lo que decía la propia auditoría en un
+caso)**: la auditoría citaba 7 conectores DEX (GRVT, Lighter, Hyperliquid,
+Paradex, Extended, Pacifica, edgeX) donde `funding_rate`/`mark_price` se
+convertían con `float()` sin `try/except`, a diferencia de OI/volumen (que
+sí lo tenían). Al revisarlos uno a uno:
+
+- **GRVT, Lighter, Paradex, Pacifica**: exactamente como decía la auditoría
+  — `mark_price` ya estaba protegido (fix del Hallazgo #13), pero
+  `funding_rate` no. Corregido: se descarta solo ese instrumento (con
+  diagnóstico), en vez de tirar el conector entero.
+- **Hyperliquid**: bug adicional no descrito por la auditoría — `mark_price`
+  se convertía DOS VECES por separado: una vez protegida (solo para el
+  cálculo de OI) y otra sin proteger, en el campo que de verdad rellena
+  `FundingRate.mark_price` — y esa segunda conversión además ignoraba el
+  guard de `mark_price == 0` del Hallazgo #13, así que un `markPx` explícito
+  de 0 sí se publicaba como precio real. Corregido: una sola conversión
+  protegida, su resultado (ya sin el caso `== 0`) se usa para las dos cosas.
+- **edgeX**: ninguna de las tres conversiones relevantes (`mark_price`,
+  `funding_rate`, `fundingRateIntervalMin`) estaba protegida — peor que la
+  descripción de la auditoría, que solo menciona dos campos. Corregido.
+- **Extended**: el peor caso de los 7 — NINGUNA de las cuatro conversiones
+  (`mark_price`, `openInterest`, `dailyVolume`, `funding_rate`) tenía
+  protección, ni siquiera OI/volumen. Corregido.
+
+Para GRVT y edgeX (los dos que usan `ThreadPoolExecutor`), se confirmó que
+la conversión sin proteger corría en el hilo PRINCIPAL, dentro del bucle
+`for future in as_completed(...)`, tras `future.result()` — una excepción
+ahí se escapaba del bucle entero y tiraba todo el conector, no solo el
+instrumento problemático, contradiciendo el propio comentario del código
+("un instrumento suelto no debe tirar todo el conector").
+
+**Fix, igual en los 7**: cada conversión antes desprotegida ahora tiene su
+propio `try/except (TypeError, ValueError)`. Un `funding_rate` no numérico
+descarta ESE instrumento (sin funding no hay nada que publicar); un
+`mark_price`/OI/volumen/intervalo no numérico solo descarta ese campo
+concreto (queda en `None` o cae al valor por defecto), el instrumento se
+sigue publicando con el resto de datos. Cada conector deja un diagnóstico
+nuevo (`<exchange> DIAGNÓSTICO ... no numérico`) con una muestra acotada de
+los valores crudos problemáticos.
+
+**Hallazgo #18 (CONFIRMADO, mismo bug exacto en MEXC y HTX)**: en ambos
+conectores, un símbolo/contract_code presente en el feed de funding pero
+AUSENTE del todo del feed de metadata (`contract/detail` en MEXC,
+`swap_contract_info` en HTX) caía en el mismo `.get(clave, valor_por_defecto
+_no_operable)` que un contrato real marcado explícitamente como no operable
+— y a diferencia de cada otro motivo de descarte en la misma función
+(que sí se registra en `skipped` y sale en el log), este caso se perdía sin
+pasar nunca por ahí.
+
+**Fix, igual en los dos**: se distingue explícitamente "símbolo ausente de
+metadata" (ahora se registra en `skipped`, visible en el log de "datos
+incompletos") de "símbolo presente pero marcado no operable" (sigue
+descartándose en silencio como siempre — es el filtro normal, no el bug).
+
+**Hallazgo #17 (pendiente, sacado del lote a petición del usuario)**:
+confirmado como hueco arquitectónico real — `core/opportunities.py` agrupa
+oportunidades por coincidencia EXACTA de `symbol` (`by_symbol[r.symbol]`,
+sin ninguna resolución de alias) y `core/normalize.py` copia `symbol` tal
+cual, sin tocarlo; en todo `core/` no existe ninguna tabla de alias
+genérica (solo el `XBT→BTC` local de `cex_kucoin.py`). ApeX mantiene
+símbolos como "1000PEPE" literales por decisión explícita y documentada. No
+se puede confirmar con evidencia si esto está costando parejas reales hoy
+sin cruzar los símbolos que trae cada conector en producción — si se
+retoma, el criterio sería diagnóstico-primero (loguear símbolos con
+prefijo de multiplicador que nunca encuentran pareja) antes de construir
+una tabla de alias a ciegas.
+
+**Verificado** con tests nuevos: `test_finding_16_unprotected_float.py` (10
+tests, uno o dos por cada uno de los 7 conectores afectados, incluido el
+bug incidental de Hyperliquid) y `test_finding_18_missing_from_metadata.py`
+(4 tests: símbolo ausente se registra, símbolo presente-pero-no-operable
+sigue en silencio, para MEXC y HTX). 98/98 tests pasan en el conjunto
+completo del proyecto tras este cambio, sin regresiones.
+
+## Resuelto (2026-09-19): Hallazgos #19, #20, #21 y #22 de la auditoría — los cuatro de severidad baja/cosmética
+
+Se continuó con "Seguimos con 19,20,21 y 22. Dejamos el 17 de momento" — el
+Hallazgo #17 sigue aparcado (ver sección anterior), estos cuatro sí se
+implementaron.
+
+**Hallazgo #19 (CONFIRMADO)**: `core/history.py`, `historical_apr()` tenía
+`WindowStat(apr_avg=avg if enough else avg, ...)` — las dos ramas del
+if/else eran idénticas, así que `apr_avg` nunca llegaba a ser `None` pese a
+que el propio campo está documentado como "`None` si no hay histórico
+suficiente". Inofensivo hasta ahora porque los dos sitios que lo leen
+(`pages/1_Funding_Rates.py`, `cli.py`) ya comprueban `enough_history` por su
+cuenta antes de usar `apr_avg`, pero era una trampa para cualquier código
+futuro que confiara solo en la documentación del campo. **Fix**: la rama
+`else` ahora devuelve `None` de verdad.
+
+**Hallazgo #20 (CONFIRMADO el desajuste, probablemente código muerto hasta
+ahora)**: `connectors/dex_risex.py`, `_strip_quote_suffix()` (fallback de
+última instancia, solo se alcanza si `_base_symbol()` no encuentra ningún
+candidato) esperaba sufijos con guion (`"-USDC"`, `"-PERP"`...), pero el
+formato CONFIRMADO en vivo para el par completo usa barra (`"BTC/USDC"` —
+el mismo conector ya lo documentaba y ya lo manejaba correctamente en
+`_base_symbol()`, solo este helper de repuesto se había quedado con la
+suposición vieja). **Fix**: se prueba primero el separador confirmado
+(barra), el guion se deja como fallback adicional por si el campo de origen
+aquí (`display_name`/`config.name`, no necesariamente el mismo que
+`base_asset_symbol`) llegara a usar otro formato algún día.
+
+**Hallazgo #21 (CONFIRMADO, severidad baja)**: `connectors/dex_variational.py`
+"deshace" el APY que reporta Variational a una tasa por intervalo, para que
+`core/normalize.py` la re-anualice sin duplicar el anualizado — una
+cancelación algebraica que solo es válida si el `HOURS_PER_YEAR` que usa
+cada lado del cálculo es EXACTAMENTE el mismo valor. Antes cada archivo
+definía su propia constante por separado (ambas en 8760, pero sin nada que
+las mantuviera iguales si una cambiaba sin la otra) — no era una regla
+exigida por el código, solo una coincidencia que se sostenía porque nadie
+había tocado ninguna de las dos. **Fix**: `dex_variational.py` ahora
+importa `HOURS_PER_YEAR` directamente de `core/normalize.py` en vez de
+redefinirla — la cancelación queda garantizada por construcción, no por
+coincidencia.
+
+**Hallazgo #22 (CONFIRMADO, cosmético)**: el docstring de
+`dex_variational.py` decía "el techo teórico de APY bajo el límite
+'2%/hora' es 0.02 × 8760 = 17.52 (1752%)" — la cuenta real da 175.2, no
+17.52 (un error de un orden de magnitud), o sea 17520%, no 1752%. Ningún
+código dependía de ese número, solo el comentario. **Fix**: corregido el
+cálculo en el comentario.
+
+**Verificado** con tests nuevos: `test_finding_19_20_21.py` (7 tests: #19
+con y sin histórico suficiente; #20 el separador confirmado, el fallback de
+guion conservado, y un caso end-to-end en RiseX sin `base_asset_symbol`;
+#21 confirma que `dex_variational.HOURS_PER_YEAR` es el MISMO objeto que
+`core.normalize.HOURS_PER_YEAR`, y un end-to-end con dos intervalos
+distintos que confirma que el APR final sigue siendo `apy × 100`). El #22
+no tiene código que testear (solo un comentario). 105/105 tests pasan en el
+conjunto completo del proyecto tras este cambio, sin regresiones.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

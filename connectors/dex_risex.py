@@ -142,6 +142,21 @@ unidad. Se accede de forma defensiva (`row.get(...)`, con `None` si falta),
 así que si el campo no existe en la respuesta real, `volume_24h_usd` queda
 simplemente en `None` para todos los mercados, sin romper el resto del
 conector.
+
+--- Nota sobre `_strip_quote_suffix()` (RESUELTO 2026-09-19, auditoría de
+    bugs, Hallazgo #20 — probablemente código muerto hasta ahora) ---
+
+Este helper (fallback de última instancia, solo se alcanza si `_base_symbol()`
+devuelve `None`) esperaba sufijos con guion (`"-USDC"`, `"-PERP"`...), pero
+el formato CONFIRMADO en vivo para el par completo usa barra (`"BTC/USDC"`
+— ver más arriba, "base_asset_symbol/display_base_asset_symbol NO vienen
+limpios"), así que nunca coincidía contra un símbolo real con ese formato —
+un desajuste real, aunque nunca observado en producción disparándose (en la
+práctica `_base_symbol()` siempre ha encontrado un candidato válido). Se
+corrige probando primero el separador confirmado (barra), dejando el guion
+como fallback adicional por si el campo de origen aquí (`display_name`/
+`config.name` — no necesariamente el mismo campo que `base_asset_symbol`)
+llegara a usar otro formato algún día.
 """
 
 from __future__ import annotations
@@ -234,6 +249,19 @@ def _base_symbol(row: dict) -> str | None:
 
 
 def _strip_quote_suffix(raw_symbol: str) -> str:
+    # Ver Hallazgo #20 de la auditoría (2026-09-19, RESUELTO): el formato
+    # CONFIRMADO en vivo para el par completo usa barra ("BTC/USDC" -- ver
+    # docstring del módulo, "base_asset_symbol/display_base_asset_symbol NO
+    # vienen limpios", y _base_symbol() más arriba, que ya usa ese mismo
+    # separador). Los sufijos con guion de _QUOTE_SUFFIXES nunca coinciden
+    # contra ese formato real -- probablemente código muerto hasta ahora
+    # (este helper solo se alcanza si _base_symbol() devuelve None, algo no
+    # observado en producción). Se prueba primero el separador confirmado
+    # (barra); el guion se deja como fallback adicional por si el campo de
+    # origen aquí (display_name/config.name -- no necesariamente el mismo
+    # campo que base_asset_symbol) llegara a usar otro formato algún día.
+    if "/" in raw_symbol:
+        return raw_symbol.split("/")[0]
     for suffix in _QUOTE_SUFFIXES:
         if raw_symbol.endswith(suffix):
             return raw_symbol[: -len(suffix)]

@@ -226,6 +226,11 @@ class LighterConnector:
 
         out: list[FundingRate] = []
         inactive_excluded: list[str] = []
+        # Ver Hallazgo #16 de la auditoría (2026-09-19): a diferencia de
+        # mark_price/open_interest/volumen (arriba), `rate` se convertía sin
+        # try/except -- un solo mercado con un valor no numérico tiraba el
+        # conector ENTERO en vez de perderse solo él.
+        non_numeric_rate_samples: dict[str, object] = {}
         for market_id, rows in rows_by_market.items():
             own_row = next((r for r in rows if str(r.get("exchange", "")).lower() == "lighter"), None)
             if own_row is None:
@@ -244,6 +249,13 @@ class LighterConnector:
             if symbol is None or rate is None:
                 continue
 
+            try:
+                funding_rate_value = float(rate)
+            except (TypeError, ValueError):
+                if len(non_numeric_rate_samples) < 6:
+                    non_numeric_rate_samples[symbol] = rate
+                continue
+
             mark_price, open_interest_base, volume_24h_usd = depth_by_market.get(
                 market_id, (None, None, None)
             )
@@ -260,7 +272,7 @@ class LighterConnector:
                     venue_type=VenueType.DEX,
                     symbol=symbol,
                     raw_symbol=symbol,
-                    funding_rate=float(rate),
+                    funding_rate=funding_rate_value,
                     interval_hours=INTERVAL_HOURS,
                     mark_price=mark_price,
                     next_funding_time=None,
@@ -285,6 +297,15 @@ class LighterConnector:
                 "%d mercado(s) con mark_price explícito de 0 -- no se calculó open_interest_usd: %s",
                 len(zero_mark_price_samples),
                 zero_mark_price_samples,
+            )
+
+        if non_numeric_rate_samples:
+            logger.warning(
+                "lighter DIAGNÓSTICO rate no numérico (Hallazgo #16 de la auditoría, 2026-09-19): "
+                "%d mercado(s) descartado(s) -- antes de este fix, cualquiera de estos habría "
+                "tirado el conector ENTERO en vez de perderse solo él: %s",
+                len(non_numeric_rate_samples),
+                non_numeric_rate_samples,
             )
 
         return out

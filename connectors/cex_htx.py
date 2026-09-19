@@ -91,6 +91,17 @@ STRING). `trade_turnover` ya es el volumen de 24h en USD directamente — no
 hace falta multiplicar por nada, igual que `value` para el open interest. Se
 lee del mismo `ticker_rows` que ya se recorre para `close`, sin ninguna
 llamada de red adicional.
+
+--- Nota sobre contract_code ausentes de swap_contract_info (RESUELTO
+    2026-09-19, auditoría de bugs, Hallazgo #18 — mismo fix que cex_mexc.py) ---
+
+`info_by_code.get(code, (None, None, False))` trataba igual dos casos
+distintos: un `contract_code` presente en `swap_contract_info` con
+`contract_status != 1` (contrato real, no operable ahora mismo -- descarte
+esperado) y un `contract_code` que no aparece EN ABSOLUTO en
+`swap_contract_info`. El segundo caso caía por el mismo default y se perdía
+sin pasar nunca por `skipped`. Ahora se distingue: un `contract_code`
+ausente de la metadata se registra en `skipped` explícitamente.
 """
 
 from __future__ import annotations
@@ -230,7 +241,23 @@ class HtxConnector:
             if code is None:
                 continue
 
-            base_symbol, interval_hours, operable = info_by_code.get(code, (None, None, False))
+            # Ver Hallazgo #18 de la auditoría (2026-09-19): mismo bug exacto
+            # que cex_mexc.py -- un contract_code AUSENTE del todo de
+            # swap_contract_info (metadata) caía por el mismo `.get(...,
+            # (None, None, False))` que un contrato presente pero con
+            # contract_status != 1 (no operable), y se perdía sin aparecer
+            # nunca en `skipped`. Ahora se distingue y se registra el caso
+            # "ausente" explícitamente; "presente pero no operable" sigue
+            # siendo el descarte silencioso normal (contrato delistado, se
+            # espera que pase con frecuencia).
+            if code not in info_by_code:
+                skipped[code] = (
+                    "Hallazgo #18: presente en funding_rate pero ausente en "
+                    "swap_contract_info (metadata) -- no se pudo confirmar si es operable"
+                )
+                continue
+
+            base_symbol, interval_hours, operable = info_by_code[code]
             if not operable or base_symbol is None:
                 continue
 

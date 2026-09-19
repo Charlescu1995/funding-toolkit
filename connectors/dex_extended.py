@@ -73,6 +73,19 @@ solo se ha visto "DELISTED" en producción, pero cualquier estado que no sea
 evidencia de que signifique nada malo, se deja pasar). `has_zero_volume_leg()`
 se retiró — un mercado ACTIVE fuera de horario es una operación real que
 ahora mismo no tiene volumen, no una fila fantasma.
+
+--- Nota sobre Hallazgo #16 de la auditoría (2026-09-19, RESUELTO) ---
+
+De los 7 conectores citados en este hallazgo, este era el peor caso:
+NINGUNA de las cuatro conversiones `float()` (mark_price, openInterest,
+dailyVolume, fundingRate) tenía try/except -- a diferencia de otros
+conectores del mismo hallazgo, donde al menos mark_price/OI ya estaban
+protegidos por el fix del Hallazgo #13. Un solo mercado con cualquiera de
+estos cuatro campos en un formato inesperado tiraba el conector ENTERO.
+Ahora: un `fundingRate` no numérico descarta el mercado (sin funding no hay
+nada que publicar); un markPrice/openInterest/dailyVolume no numérico solo
+descarta ese campo concreto, el mercado se sigue publicando con el resto de
+datos.
 """
 
 from __future__ import annotations
@@ -114,6 +127,13 @@ class ExtendedConnector:
         # Un `status` ausente no se descarta -- no hay evidencia de que
         # signifique nada malo.
         ghost_symbols: list[str] = []
+        # Ver Hallazgo #16 de la auditoría (2026-09-19): a diferencia del
+        # resto de conectores del mismo hallazgo (donde al menos mark_price/
+        # OI ya estaban protegidos por el fix del #13), aquí NINGUNA de las
+        # cuatro conversiones (mark_price, openInterest, dailyVolume,
+        # fundingRate) tenía try/except -- un solo mercado con un valor no
+        # numérico tiraba el conector ENTERO.
+        non_numeric_samples: dict[str, dict] = {}
 
         out: list[FundingRate] = []
         for row in rows:
@@ -132,16 +152,48 @@ class ExtendedConnector:
                 continue
 
             symbol = raw_symbol.split("-")[0]
+
+            # Ver Hallazgo #16 de la auditoría (2026-09-19): un fundingRate
+            # no numérico descarta el mercado entero (sin funding no hay
+            # nada que publicar) -- antes tiraba el conector ENTERO.
+            try:
+                funding_rate_value = float(rate)
+            except (TypeError, ValueError):
+                if len(non_numeric_samples) < 6:
+                    non_numeric_samples[raw_symbol] = {"fundingRate_raw": rate}
+                continue
+
             mark_price_raw = stats.get("markPrice")
-            mark_price = float(mark_price_raw) if mark_price_raw is not None else None
+            mark_price = None
+            if mark_price_raw is not None:
+                try:
+                    mark_price = float(mark_price_raw)
+                except (TypeError, ValueError):
+                    mark_price = None
+                    if len(non_numeric_samples) < 6:
+                        non_numeric_samples.setdefault(raw_symbol, {})["markPrice_raw"] = mark_price_raw
 
             oi_raw = stats.get("openInterest")  # ya en USD (activo de colateral)
-            oi_usd = float(oi_raw) if oi_raw is not None else None
+            oi_usd = None
+            if oi_raw is not None:
+                try:
+                    oi_usd = float(oi_raw)
+                except (TypeError, ValueError):
+                    oi_usd = None
+                    if len(non_numeric_samples) < 6:
+                        non_numeric_samples.setdefault(raw_symbol, {})["openInterest_raw"] = oi_raw
 
             # Ver docstring: dailyVolume ya viene en USD (activo de colateral),
             # igual patrón que openInterest — sin conversión.
             volume_24h_raw = stats.get("dailyVolume")
-            volume_24h_usd = float(volume_24h_raw) if volume_24h_raw is not None else None
+            volume_24h_usd = None
+            if volume_24h_raw is not None:
+                try:
+                    volume_24h_usd = float(volume_24h_raw)
+                except (TypeError, ValueError):
+                    volume_24h_usd = None
+                    if len(non_numeric_samples) < 6:
+                        non_numeric_samples.setdefault(raw_symbol, {})["dailyVolume_raw"] = volume_24h_raw
 
             out.append(
                 FundingRate(
@@ -149,7 +201,7 @@ class ExtendedConnector:
                     venue_type=VenueType.DEX,
                     symbol=symbol,
                     raw_symbol=raw_symbol,
-                    funding_rate=float(rate),
+                    funding_rate=funding_rate_value,
                     interval_hours=INTERVAL_HOURS,
                     mark_price=mark_price,
                     next_funding_time=None,
@@ -164,6 +216,18 @@ class ExtendedConnector:
                 "ver README/docstring de este módulo): %s",
                 len(ghost_symbols),
                 ghost_symbols[:10],
+            )
+
+        if non_numeric_samples:
+            logger.warning(
+                "extended DIAGNÓSTICO valor no numérico (Hallazgo #16 de la auditoría, "
+                "2026-09-19): %d mercado(s) con fundingRate/markPrice/openInterest/dailyVolume "
+                "no numérico -- un fundingRate no numérico descarta el mercado entero, el resto "
+                "solo descarta ese campo concreto. Antes de este fix, CUALQUIERA de estos "
+                "campos con un valor no numérico habría tirado el conector ENTERO (este módulo "
+                "no tenía ninguna conversión protegida): %s",
+                len(non_numeric_samples),
+                non_numeric_samples,
             )
 
         return out

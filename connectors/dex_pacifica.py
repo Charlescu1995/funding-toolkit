@@ -22,6 +22,13 @@ así que, al contrario que `open_interest`, se usa DIRECTAMENTE sin
 multiplicar por el mark price:
 
     volume_24h_usd = float(volume_24h)   (directo, sin conversión)
+
+--- Nota sobre Hallazgo #16 de la auditoría (2026-09-19, RESUELTO) ---
+
+`float(rate)` (campo `funding`) no tenía try/except -- a diferencia de
+mark/open_interest/volume_24h (que ya SÍ estaban protegidos), un solo
+símbolo con un valor no numérico tiraba el conector ENTERO. Ahora se
+descarta solo ese símbolo y se registra en diagnóstico.
 """
 
 from __future__ import annotations
@@ -65,10 +72,21 @@ class PacificaConnector:
         out: list[FundingRate] = []
         # Ver Hallazgo #13 de la auditoría (2026-09-19, severidad baja).
         zero_mark_price_samples: dict[str, object] = {}
+        # Ver Hallazgo #16 de la auditoría (2026-09-19): a diferencia de
+        # mark/OI/volumen (abajo), `rate` se convertía sin try/except -- un
+        # solo símbolo con un valor no numérico tiraba el conector ENTERO.
+        non_numeric_rate_samples: dict[str, object] = {}
         for row in rows:
             symbol = row.get("symbol")
             rate = row.get("funding")
             if symbol is None or rate is None:
+                continue
+
+            try:
+                funding_rate_value = float(rate)
+            except (TypeError, ValueError):
+                if len(non_numeric_rate_samples) < 6:
+                    non_numeric_rate_samples[symbol] = rate
                 continue
 
             mark_price_raw = row.get("mark")
@@ -106,7 +124,7 @@ class PacificaConnector:
                     venue_type=VenueType.DEX,
                     symbol=symbol,
                     raw_symbol=symbol,
-                    funding_rate=float(rate),
+                    funding_rate=funding_rate_value,
                     interval_hours=INTERVAL_HOURS,
                     mark_price=mark_price,
                     next_funding_time=None,
@@ -121,6 +139,15 @@ class PacificaConnector:
                 "%d símbolo(s) con mark explícito de 0 -- no se calculó open_interest_usd: %s",
                 len(zero_mark_price_samples),
                 zero_mark_price_samples,
+            )
+
+        if non_numeric_rate_samples:
+            logger.warning(
+                "pacifica DIAGNÓSTICO funding no numérico (Hallazgo #16 de la auditoría, "
+                "2026-09-19): %d símbolo(s) descartado(s) -- antes de este fix, cualquiera de "
+                "estos habría tirado el conector ENTERO en vez de perderse solo él: %s",
+                len(non_numeric_rate_samples),
+                non_numeric_rate_samples,
             )
 
         return out

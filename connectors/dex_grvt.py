@@ -489,6 +489,14 @@ class GrvtConnector:
         # mismo guard defensivo que cex_kucoin.py/cex_mexc.py -- un
         # mark_price de 0 no se propaga (daría oi_usd=0.0 en silencio).
         zero_mark_price_samples: dict[str, object] = {}
+        # Ver Hallazgo #16 de la auditoría (2026-09-19): a diferencia de
+        # mark_price/open_interest/volumen (arriba), la conversión de
+        # funding_rate no tenía try/except -- un solo instrumento con un
+        # valor no numérico en funding_rate_8h_curr/funding_rate_curr tiraba
+        # el conector ENTERO (esto corre en el hilo principal, tras
+        # future.result(), así que la excepción se escapa del bucle
+        # `as_completed` y no se queda contenida a ese instrumento).
+        non_numeric_rate_samples: dict[str, object] = {}
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             future_to_name = {
@@ -564,6 +572,17 @@ class GrvtConnector:
                         unparsed_samples[name] = {"claves_presentes": list(ticker.keys())}
                     continue
 
+                # Ver Hallazgo #16 de la auditoría (2026-09-19, ver docstring
+                # del módulo): un valor no numérico aquí antes tiraba TODO el
+                # conector -- ahora se descarta solo este instrumento, igual
+                # que ya hacen los demás campos (mark_price/OI/volumen).
+                try:
+                    funding_rate_value = float(rate_raw) / 100.0
+                except (TypeError, ValueError):
+                    if len(non_numeric_rate_samples) < 6:
+                        non_numeric_rate_samples[name] = rate_raw
+                    continue
+
                 # Ver "ESTADO ACTUAL CONFIRMADO" en el docstring del módulo:
                 # confirmado con datos EN VIVO (2026-09-16, 7 instrumentos
                 # reales) que mark_price/open_interest/buy_volume_24h_q/
@@ -624,7 +643,7 @@ class GrvtConnector:
                         "sell_volume_24h_q_raw": sell_q_raw,
                         "volume_24h_usd_calculado": volume_24h_usd,
                         "funding_rate_raw": rate_raw,
-                        "funding_rate_calculado": float(rate_raw) / 100.0,
+                        "funding_rate_calculado": funding_rate_value,
                     }
 
                 out.append(
@@ -633,7 +652,7 @@ class GrvtConnector:
                         venue_type=VenueType.DEX,
                         symbol=base,
                         raw_symbol=name,
-                        funding_rate=float(rate_raw) / 100.0,
+                        funding_rate=funding_rate_value,
                         interval_hours=interval_hours,
                         mark_price=mark_price,
                         next_funding_time=None,
@@ -670,6 +689,15 @@ class GrvtConnector:
                 "open_interest_usd: %s",
                 len(zero_mark_price_samples),
                 json.dumps(zero_mark_price_samples, default=str)[:4000],
+            )
+
+        if non_numeric_rate_samples:
+            logger.warning(
+                "grvt DIAGNÓSTICO funding_rate no numérico (Hallazgo #16 de la auditoría, "
+                "2026-09-19): %d instrumento(s) descartado(s) -- antes de este fix, cualquiera "
+                "de estos habría tirado el conector ENTERO en vez de perderse solo él: %s",
+                len(non_numeric_rate_samples),
+                json.dumps(non_numeric_rate_samples, default=str)[:4000],
             )
 
         if not out:

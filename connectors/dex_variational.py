@@ -28,9 +28,13 @@ fracción decimal). Evidencia:
     cualquier ventana de 4h a un máximo de ±8%).
   - Se comprobaron en vivo los 5 valores de mayor y menor magnitud sobre
     los 553 mercados: el máximo observado fue REZ en -1.333404 (14400s).
-    El techo teórico de APY bajo el límite "2%/hora" es 0.02 × 8760 = 17.52
-    (1752%) — un valor de -1.333 (-133%) encaja perfectamente como APY,
-    pero sería absurdo como tasa de un solo intervalo de 4h.
+    El techo teórico de APY bajo el límite "2%/hora" es 0.02 × 8760 = 175.2
+    (17520%) — [corregido 2026-09-19, auditoría de bugs, Hallazgo #22: la
+    cuenta anterior de este comentario decía "17.52 (1752%)", un error
+    aritmético de un orden de magnitud (0.02 × 8760 = 175.2, no 17.52); no
+    afectaba a ningún código, solo a este comentario] — un valor de -1.333
+    (-133%) encaja perfectamente como APY, muy por debajo del techo teórico
+    de 17520%, y sería absurdo como tasa de un solo intervalo de 4h.
   - Se contrastó contra https://loris.tools/funding/exchange/variational
     (uno de los dos trackers en los que se inspira este proyecto, según la
     primera línea del README) — Loris muestra las tasas de Variational en
@@ -65,6 +69,17 @@ es siempre `funding_rate × 100` tal cual lo reporta Variational,
 independientemente de `funding_interval_s`. Ese campo sí importa para el
 resto de columnas derivadas (tasa cruda del intervalo, "cada 8h"), solo no
 para el APR anualizado.
+
+**Nota sobre Hallazgo #21 de la auditoría (2026-09-19, RESUELTO)**: esa
+cancelación algebraica solo es válida si el `HOURS_PER_YEAR` que usa este
+módulo para deshacer el APY y el que usa `core/normalize.py` para
+re-anualizar son EXACTAMENTE el mismo valor. Antes cada archivo definía su
+propia constante por separado (ambas en 8760, pero sin nada que las
+mantuviera iguales si una cambiaba sin la otra) — no era una regla exigida
+por el código, era una coincidencia que se mantenía por no haber tocado
+ninguna de las dos. Ahora este módulo importa `HOURS_PER_YEAR` directamente
+de `core/normalize.py` en vez de redefinirla: la cancelación queda
+garantizada por construcción, no por coincidencia.
 
 --- Nota sobre `open_interest` (CONFIRMADA contra la UI oficial) ---
 
@@ -116,13 +131,23 @@ import logging
 
 import requests
 
+from core.normalize import HOURS_PER_YEAR
+
 from .base import FundingRate, VenueType
 
 logger = logging.getLogger(__name__)
 
 STATS_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats"
 
-HOURS_PER_YEAR = 8760.0
+# Ver Hallazgo #21 de la auditoría (2026-09-19, RESUELTO): antes este
+# conector definía su PROPIA constante `HOURS_PER_YEAR = 8760.0`, un
+# duplicado exacto de la de core/normalize.py. La "Nota técnica" de más
+# arriba en este docstring explica que la conversión APY→tasa por
+# intervalo→re-anualizar es matemáticamente neutra SOLO si las dos
+# constantes coinciden -- con dos definiciones separadas, eso dependía de
+# que nadie tocara una sin la otra (nada lo forzaba ni lo avisaba). Ahora
+# se importa la MISMA constante de core/normalize.py -- ya no hay dos
+# valores que puedan desincronizarse, solo uno.
 
 
 class VariationalConnector:

@@ -169,6 +169,21 @@ chequeo igual y dado `open_interest_usd = 0.0` -- un contrato operable
 mostrado como si tuviera profundidad cero. Se descarta igual que un
 fairPrice ausente (mark_price a None, no se calcula OI) y se registra una
 muestra de diagnóstico. Guardia defensiva, nunca observada en vivo.
+
+--- Nota sobre símbolos ausentes de contract/detail (RESUELTO 2026-09-19,
+    auditoría de bugs, Hallazgo #18) ---
+
+`detail_by_symbol.get(symbol, (None, False))` trataba IGUAL dos casos muy
+distintos: un símbolo presente en `contract/detail` pero con `operable =
+False` (un contrato real, simplemente no operable ahora mismo -- el
+descarte esperado y normal) y un símbolo que no aparece EN ABSOLUTO en
+`contract/detail` (la metadata ni siquiera lo conoce -- algo mucho más raro
+y potencialmente indicio de un desajuste entre los dos endpoints). El
+segundo caso caía por el mismo default `(None, False)` y se perdía sin
+pasar nunca por `skipped`, a diferencia de cada otro motivo de descarte en
+esta misma función. Ahora se distingue explícitamente: un símbolo ausente
+de `contract/detail` se registra en `skipped` (y por tanto aparece en el
+log), el caso "presente pero no operable" sigue igual que siempre.
 """
 
 from __future__ import annotations
@@ -356,7 +371,23 @@ class MexcConnector:
             if symbol is None:
                 continue
 
-            contract_size, operable = detail_by_symbol.get(symbol, (None, False))
+            # Ver Hallazgo #18 de la auditoría (2026-09-19): a diferencia de
+            # un símbolo presente en detail_by_symbol pero con operable=False
+            # (un contrato real, simplemente no operable ahora mismo -- se
+            # sigue descartando en silencio, es el filtro normal), un
+            # símbolo AUSENTE del todo de contract/detail es una situación
+            # distinta -- antes cogía el mismo camino (`.get(..., (None,
+            # False))` hacía operable=False por el valor por defecto) y se
+            # perdía sin aparecer nunca en `skipped`, indistinguible de un
+            # descarte esperado. Ahora se registra explícitamente.
+            if symbol not in detail_by_symbol:
+                skipped[symbol] = (
+                    "Hallazgo #18: presente en funding_rate pero ausente en "
+                    "contract/detail (metadata) -- no se pudo confirmar si es operable"
+                )
+                continue
+
+            contract_size, operable = detail_by_symbol[symbol]
             if not operable:
                 continue
 

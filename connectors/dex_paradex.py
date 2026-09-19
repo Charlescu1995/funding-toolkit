@@ -85,6 +85,59 @@ confirmó en el primer despliegue real: Paradex corrió sin errores pero el
 diagnóstico (escrito primero a nivel INFO) no apareció en el log. Mismo
 nivel que ya usan el resto de diagnósticos del proyecto (MEXC #11/#12, OI
 negativo, GRVT).
+
+--- CONFIRMADO en producción real (2026-09-19, tercer despliegue -- ya con
+    el diagnóstico visible a nivel WARNING) ---
+
+Con el fix de logging corregido, el diagnóstico `paradex DIAGNÓSTICO escala
+de funding_rate` apareció en el log real de Streamlit Cloud, repetido en
+varios ciclos de refresco dentro del mismo despliegue. Muestras reales de
+`funding_rate` crudo observadas (símbolo: valor):
+
+    SUI-USD-PERP    ~0.0001
+    ETH-USD-PERP    ~0.0001
+    NG-USD-PERP, MRVL-USD-PERP, VVV-USD-PERP, kSHIB-USD-PERP,
+    XPT-USD-PERP, NEAR-USD-PERP, PUMP-USD-PERP, ETHFI-USD-PERP,
+    PYTH-USD-PERP, XPL-USD-PERP                    ~0.00003 - 0.0001
+    BZ-USD-PERP     ~0.000037
+    XAU-USD-PERP    exactamente 0.00005 en los 3 ciclos muestreados
+    US100-USD-PERP  exactamente 0.00005 en los 3 ciclos muestreados
+
+Estas magnitudes (fracciones decimales del orden de 0.003%-0.01% por
+periodo de 8h) son justo el rango de un funding rate real interpretado SIN
+escalar -- coincide con el ejemplo trabajado de
+`docs.paradex.trade/risk/funding-mechanism` (Raw Rate = 0.0003 = 0.03%) y
+es incompatible con la lectura "número en porcentaje" que sugería el
+ejemplo `"funding_rate": "0.3"` de la página de referencia del endpoint
+(0.3 interpretado como "30%" por periodo de 8h sería un funding
+descabellado; como valor sin escalar también sería ~1000x mayor que
+cualquier muestra real vista aquí). Esto confirma que ese "0.3" era en
+efecto un placeholder autogenerado del esquema OpenAPI, tal como se
+sospechaba, y no un valor real de referencia.
+
+Que XAU-USD-PERP y US100-USD-PERP salgan exactamente 0.00005 en los tres
+ciclos muestreados no contradice esto -- es consistente con un funding rate
+mínimo/floor específico para mercados de índice o materia prima (que
+suelen tener bandas de funding más estrechas que cripto), no con un
+problema de escala: si hubiera un factor de escala incorrecto de por medio,
+el valor "plano" seguiría siendo el mismo número relativo, solo que
+desplazado varios órdenes de magnitud respecto al resto de símbolos --y no
+es el caso aquí, ya que 0.00005 está en la misma magnitud que el resto de
+muestras.
+
+**Conclusión: Hallazgo #14 pasa de SOSPECHOSO a CONFIRMADO.** No se
+necesita ningún cambio de fórmula -- el código actual (sin escalar) ya
+coincide con los datos reales de producción. El log de diagnóstico se deja
+tal cual (no estorba y sirve como registro histórico de esta confirmación),
+siguiendo el mismo criterio que con los Hallazgos #11/#12.
+
+--- Nota sobre Hallazgo #16 de la auditoría (2026-09-19, RESUELTO) ---
+
+`float(rate)` no tenía try/except -- a diferencia de mark_price/open_interest/
+volume_24h (que ya SÍ estaban protegidos), un solo símbolo con un valor no
+numérico en `funding_rate` tiraba el conector ENTERO. Ahora se descarta
+solo ese símbolo y se registra en un diagnóstico aparte
+(`paradex DIAGNÓSTICO funding_rate no numérico`).
 """
 
 from __future__ import annotations
@@ -130,6 +183,11 @@ class ParadexConnector:
         # los primeros valores crudos vistos, para poder confirmar/
         # descartar la escala con el próximo log real de producción.
         funding_rate_samples: dict[str, object] = {}
+        # Ver Hallazgo #16 de la auditoría (2026-09-19): a diferencia de
+        # mark_price/OI/volumen (abajo), `rate` se convertía sin try/except
+        # -- un solo símbolo con un valor no numérico tiraba el conector
+        # ENTERO en vez de perderse solo él.
+        non_numeric_rate_samples: dict[str, object] = {}
         for row in rows:
             raw_symbol = row.get("symbol")  # ej. "BTC-USD-PERP"
             rate = row.get("funding_rate")
@@ -148,6 +206,13 @@ class ParadexConnector:
                     "funding_rate_raw": rate,
                     "mark_price_raw": row.get("mark_price"),
                 }
+
+            try:
+                funding_rate_value = float(rate)
+            except (TypeError, ValueError):
+                if len(non_numeric_rate_samples) < 6:
+                    non_numeric_rate_samples[raw_symbol] = rate
+                continue
 
             mark_price_raw = row.get("mark_price")
             mark_price = None
@@ -188,7 +253,7 @@ class ParadexConnector:
                     venue_type=VenueType.DEX,
                     symbol=symbol,
                     raw_symbol=raw_symbol,
-                    funding_rate=float(rate),
+                    funding_rate=funding_rate_value,
                     interval_hours=INTERVAL_HOURS,
                     mark_price=mark_price,
                     next_funding_time=None,
@@ -216,6 +281,15 @@ class ParadexConnector:
                 "grandes o más pequeños, la escala asumida en el código es incorrecta): %s",
                 len(funding_rate_samples),
                 funding_rate_samples,
+            )
+
+        if non_numeric_rate_samples:
+            logger.warning(
+                "paradex DIAGNÓSTICO funding_rate no numérico (Hallazgo #16 de la auditoría, "
+                "2026-09-19): %d símbolo(s) descartado(s) -- antes de este fix, cualquiera de "
+                "estos habría tirado el conector ENTERO en vez de perderse solo él: %s",
+                len(non_numeric_rate_samples),
+                non_numeric_rate_samples,
             )
 
         return out

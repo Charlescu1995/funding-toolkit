@@ -68,12 +68,46 @@ ticker, a diferencia de otros exchanges donde `raw_symbol` sí difiere del
 ya usa Hyperliquid (`connectors/dex_hyperliquid.py`) cuando tampoco hay
 nada más nativo que el propio ticker.
 
-De paso, se vio en `orderBookDetails` un campo `status` ("active"/
-"inactive") que este conector no usa todavía — no se tocó (fuera del
-alcance de este arreglo cosmético), pero queda para investigar si algún
-mercado "inactive" se está colando en el ranking como si operara con
-normalidad, mismo patrón que el bug real de `status` en Extended (ver
-README).
+--- Nota sobre `status` en orderBookDetails — RESUELTO (2026-09-19,
+    auditoría de bugs, Hallazgo #6) ---
+
+Se vio (arreglo del `raw_symbol` de más arriba) un campo `status`
+("active"/"inactive") en `orderBookDetails` que este conector no usaba.
+Antes de tocar nada se confirmó en vivo (WebFetch): en el momento de esta
+investigación había 8 mercados "inactive" identificados de forma
+consistente en dos llamadas distintas (MAGS, SPACEX, AI16Z, HYUNDAI,
+KRCOMP, DUSK, BIRB, LAUNCHCOIN — el recuento TOTAL de mercados que dio
+WebFetch varió entre llamadas, 63 vs. 80, la misma truncación silenciosa
+en arrays grandes ya documentada en connectors/cex_kucoin.py, así que ese
+total no es fiable, pero estos 8 market_id concretos sí se repitieron
+igual en ambas).
+
+Se comprobó, uno a uno contra `/funding-rates`, si alguno de esos 8
+mercados "inactive" tenía una fila `exchange="lighter"` — que es la que
+este conector ya exige para no descartar el mercado (ver nota de arriba
+sobre el bug real de exchanges de referencia mal etiquetados). **Resultado
+confirmado: NINGUNO de los 8 la tenía.** Es decir, con el código actual,
+un mercado "inactive" en `orderBookDetails` ya no llega a producir ninguna
+`FundingRate` HOY — el filtro existente de "solo fila propia de lighter"
+ya los descarta de facto, sin necesidad del campo `status` para nada.
+
+Aun así, se añade el filtro por `status` como defensa adicional, no
+porque haya un bug real observado: `funding-rates` y `orderBookDetails`
+son dos llamadas HTTP independientes, sin ninguna garantía documentada de
+que se actualicen atómicamente a la vez — es perfectamente posible que un
+mercado pase a "inactive" en el order book mientras `/funding-rates`
+todavía trae, por una ventana breve, una fila `exchange="lighter"`
+residual (caché, orden de invalidación distinto entre los dos
+endpoints...). Sin este filtro, esa ventana colaría el mercado en el
+Ranking con datos de un libro de órdenes ya inactivo. Mismo criterio que
+el guard de OI negativo añadido a MEXC/HTX (Hallazgo #3): defensivo, sin
+causa raíz confirmada todavía, pero correcto tenerlo.
+
+**Fix**: se excluyen del todo (no solo se dejan sin profundidad) los
+market_id marcados `status` distinto de `"active"` en `orderBookDetails`
+— mismo patrón que `has_implausible_price_pair()`/el filtro de `status`
+de `dex_extended.py`: un `status` ausente NO se descarta (no hay evidencia
+de que signifique nada malo, solo que el campo faltó en esa fila).
 """
 
 from __future__ import annotations
@@ -130,10 +164,20 @@ class LighterConnector:
 
         # market_id -> (mark_price, open_interest en unidades base, volumen 24h en USD)
         depth_by_market: dict[int, tuple[float | None, float | None, float | None]] = {}
+        # Ver docstring, "Nota sobre status" (Hallazgo #6 de la auditoría,
+        # 2026-09-19): mercados marcados status != "active" se excluyen del
+        # todo más abajo, no solo se dejan sin profundidad.
+        inactive_market_ids: dict[int, str] = {}  # market_id -> symbol, para el log
         for row in depth_rows:
             market_id = row.get("market_id")
             if market_id is None:
                 continue
+
+            status = row.get("status")
+            if status is not None and status != "active":
+                inactive_market_ids[market_id] = row.get("symbol") or str(market_id)
+                continue
+
             mark_price_raw = row.get("mark_price")
             mark_price = float(mark_price_raw) if mark_price_raw is not None else None
             open_interest = row.get("open_interest")
@@ -168,9 +212,18 @@ class LighterConnector:
             rows_by_market.setdefault(market_id, []).append(row)
 
         out: list[FundingRate] = []
+        inactive_excluded: list[str] = []
         for market_id, rows in rows_by_market.items():
             own_row = next((r for r in rows if str(r.get("exchange", "")).lower() == "lighter"), None)
             if own_row is None:
+                continue
+
+            # Ver docstring, "Nota sobre status" (Hallazgo #6): defensivo --
+            # en la práctica observada, un mercado "inactive" ya nunca llega
+            # aquí porque tampoco tiene fila "lighter" propia (ver arriba),
+            # pero por si /funding-rates y /orderBookDetails se desincronizan.
+            if market_id in inactive_market_ids:
+                inactive_excluded.append(inactive_market_ids[market_id])
                 continue
 
             symbol = own_row.get("symbol")
@@ -201,6 +254,16 @@ class LighterConnector:
                     open_interest_usd=oi_usd,
                     volume_24h_usd=volume_24h_usd,
                 )
+            )
+
+        if inactive_excluded:
+            logger.info(
+                "lighter: %d mercado(s) excluido(s) por status distinto de 'active' en "
+                "orderBookDetails (Hallazgo #6 de la auditoría, defensivo -- en la práctica "
+                "observada estos mercados ya no tienen fila 'lighter' propia en funding-rates, "
+                "ver docstring del módulo): %s",
+                len(inactive_excluded),
+                sorted(inactive_excluded),
             )
 
         return out

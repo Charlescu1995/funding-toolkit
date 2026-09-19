@@ -1628,6 +1628,54 @@ válido produce un `datetime` real timezone-aware con el valor correcto, y
 tests pasan en el conjunto completo del proyecto tras este cambio, sin
 regresiones.
 
+## Resuelto (2026-09-19): Hallazgo #6 — mercados `inactive` sin filtrar en Lighter
+
+`connectors/dex_lighter.py` veía, desde el arreglo cosmético del
+`raw_symbol` (ver más arriba), un campo `status` (`"active"`/`"inactive"`)
+en `orderBookDetails` que no se usaba todavía — mismo patrón, en teoría,
+que el bug real ya arreglado en `dex_extended.py` (mercados delistados que
+seguían dando datos de ticker).
+
+**Antes de tocar nada se confirmó en vivo (WebFetch, 2026-09-19)**: en el
+momento de la investigación había mercados `"inactive"` — 8 market_id se
+repitieron de forma consistente en dos llamadas distintas a
+`orderBookDetails` (MAGS, SPACEX, AI16Z, HYUNDAI, KRCOMP, DUSK, BIRB,
+LAUNCHCOIN), aunque el TOTAL de mercados que devolvió WebFetch varió entre
+llamadas (63 vs. 80) — la misma truncación silenciosa en arrays grandes ya
+documentada en `connectors/cex_kucoin.py`, así que ese total no es
+fiable, pero estos 8 market_id concretos sí. Se comprobó, uno a uno contra
+`/funding-rates`, si alguno de esos 8 tenía una fila `exchange="lighter"`
+— que es lo que este conector ya exige para no descartar un mercado (ver
+la nota del propio módulo sobre exchanges de referencia mal etiquetados).
+
+**Resultado confirmado: NINGUNO de los 8 la tenía.** Es decir, a
+diferencia de Extended (donde SÍ había un bug real observado), aquí el
+filtro que YA existía (solo se queda con la fila propia de "lighter") ya
+descartaba de facto estos 8 mercados inactivos, sin necesidad del campo
+`status` para nada — el `status` sin usar no estaba causando ningún dato
+malo en el Ranking hoy.
+
+**Fix aplicado de todos modos, con el mismo criterio que el guard de OI
+negativo de MEXC/HTX (Hallazgo #3)**: defensivo, sin causa raíz real
+observada, pero correcto tenerlo. `/funding-rates` y `/orderBookDetails`
+son dos llamadas HTTP independientes sin ninguna garantía documentada de
+actualizarse atómicamente a la vez — es perfectamente posible que un
+mercado pase a `"inactive"` en el order book mientras `/funding-rates`
+todavía trae, por una ventana breve, una fila `"lighter"` residual. Se
+excluyen del todo (no solo se dejan sin profundidad) los `market_id`
+marcados `status` distinto de `"active"`, mismo patrón que el filtro de
+`status` de `dex_extended.py`: un `status` ausente NO se descarta.
+
+**Verificado** con un test nuevo
+(`test_lighter_inactive_status_guard.py`): el caso real confirmado (MAGS,
+inactive y sin fila lighter) sigue descartado igual que antes; el caso
+hipotético que el fix protege de verdad (un mercado inactive con una fila
+lighter residual, simulando la desincronización) ahora SÍ se descarta,
+cosa que antes no pasaba; un mercado `"active"` sano no se ve afectado; y
+un `status` ausente no se descarta, mismo criterio que Extended. 32/32
+tests pasan en el conjunto completo del proyecto tras este cambio, sin
+regresiones.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

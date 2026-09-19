@@ -1316,6 +1316,75 @@ con el próximo log de despliegue, sin necesidad de adivinar. Probado con un
 conector falso que devuelve el mismo raw_symbol dos veces: el aviso sale
 exactamente como se espera.
 
+## Resuelto (2026-09-19): oportunidades con long y short en el MISMO exchange (auditoría de bugs #2)
+
+Tras la investigación de arriba (128/128 filas con `raw_symbol` idéntico
+entre las dos piernas — duplicado literal del mismo contrato, no dos
+contratos reales colisionando) se dejó el caso "en observación 24 horas" en
+vez de filtrarlo, a la espera de ver si aparecía algún caso sospechoso
+distinto. La auditoría de bugs completa (`AUDITORIA_BUGS_2026-09-19.md`,
+Hallazgo #2) encontró el problema real: `pages/1_Funding_Rates.py`
+calculaba `same_exchange_pairs` para el panel de diagnóstico pero **nunca
+lo restaba de `opportunities`** — a diferencia de `implausible_pairs`,
+`dead_liquidity` y `low_liquidity`, que sí se restan justo al lado de
+calcularse. Es decir: las 121+ filas mismo-exchange seguían apareciendo en
+el Ranking normal, con Spread APR llamativo (aunque fuera 0.0% en los
+casos vistos hasta ahora), sin ningún filtro real protegiendo el ranking.
+
+**Por qué salía siempre 0.0% en los casos vistos y por qué eso no bastaba
+como protección**: revisando `compute_opportunities()` (`core/opportunities.py`),
+
+```python
+long_leg = min(group, key=lambda r: r.apr_pct)
+short_leg = max(group, key=lambda r: r.apr_pct)
+```
+
+cuando dos filas del mismo símbolo EMPATAN en `apr_pct` (el caso real visto
+en producción: duplicado literal del mismo contrato), `min()` y `max()` de
+Python devuelven el MISMO objeto — verificado directamente:
+
+```python
+group = [R('bitget', 5.0), R('bitget', 5.0)]
+long_leg = min(group, key=lambda r: r.apr_pct)
+short_leg = max(group, key=lambda r: r.apr_pct)
+# long_leg is short_leg  →  True
+```
+
+de ahí que `spread_apr` saliera exactamente 0.0% en las 121 filas — no es
+que hubiera protección, es que ambas piernas son literalmente la misma
+fila. Pero eso solo cubre el caso EMPATADO. Si el mismo exchange aporta dos
+filas GENUINAMENTE DISTINTAS para el mismo símbolo normalizado (ej. un
+contrato perpetuo y uno con vencimiento, con `apr_pct` distinto), `min()`/
+`max()` sí devuelven objetos distintos, se calcula un Spread APR no-cero, y
+esa fila pasaba el Ranking sin ningún aviso ni filtro — el caso realmente
+peligroso, y el que la auditoría encontró sin protección alguna.
+
+**Fix**: en `pages/1_Funding_Rates.py`, justo después de calcular
+`same_exchange_pairs`, se añadió la resta que faltaba —
+
+```python
+same_exchange_pairs = [o for o in opportunities if o.long_exchange == o.short_exchange]
+opportunities = [o for o in opportunities if o.long_exchange != o.short_exchange]
+```
+
+mismo patrón que los otros tres filtros — con un aviso `st.caption(...)`
+nuevo (mismos símbolos que se descartan) y el panel de diagnóstico
+existente actualizado para explicar el mecanismo del empate de
+`min()`/`max()` y dejar constancia de la fecha del arreglo. `compute_opportunities()`
+en sí no se tocó — el filtro sigue siendo responsabilidad de la capa de
+página, igual que los otros tres, así que cualquier otro consumidor (por
+ejemplo `cli.py`) tendría que aplicar el mismo filtro por su cuenta si
+alguna vez muestra `opportunities` sin pasar por esta página.
+
+**Verificado** con un test nuevo (`test_same_exchange_filter.py`) que usa
+`compute_opportunities()` real (no solo la línea del filtro aislada): (1)
+el caso EMPATADO ya visto en producción (Spread=0%) se descarta, (2) un
+caso NO empatado sintético (mismo exchange, `apr_pct` distinto, Spread APR
+≠ 0% — el caso que antes se colaba sin protección) también se descarta, y
+(3) una oportunidad cruzada real entre dos exchanges distintos sobrevive
+intacta. 18/18 tests pasan en el conjunto completo del proyecto tras este
+cambio, sin regresiones.
+
 ## Resuelto (2026-09-18 → 2026-09-19): piso de liquidez mínima
 
 Al mismo tiempo que lo de arriba, el usuario planteó que las oportunidades

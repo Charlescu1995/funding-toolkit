@@ -223,25 +223,39 @@ with tab_ranking:
     if not opportunities:
         st.info("Ningún símbolo está presente en 2+ exchanges con los filtros actuales — no hay spread que calcular.")
     else:
-        # Investigando (2026-09-18): el usuario detectó, en un export CSV del
-        # Ranking, 121 filas donde long_exchange == short_exchange con Spread
-        # APR exactamente 0.0% (ej. SSV en okx vs okx, CIFR en gate vs gate,
-        # MUSTOCK en mexc vs mexc). compute_opportunities() nunca comprueba
-        # que las dos piernas de una oportunidad vengan de exchanges
-        # distintos — solo agrupa por símbolo normalizado y coge el
-        # mínimo/máximo APR del grupo. Si un símbolo está listado en solo UN
-        # exchange, `len(group) < 2` lo descarta entero (no puede producir
-        # esto) — así que para que pase hace falta lo contrario: que ESE
-        # exchange, él solo, aporte 2+ filas para el mismo símbolo
-        # normalizado (candidatos de código, sin confirmar aún en vivo por
-        # bloqueo de red del sandbox de desarrollo: un perpetuo + un futuro
-        # con vencimiento pasando el mismo filtro de quote en cex_ccxt.py, o
-        # dos variantes de quote/contrato colapsando al mismo símbolo en
-        # MEXC/KuCoin — ver sus conectores). Solo diagnóstico por ahora, NO
-        # se descarta nada todavía: hace falta ver el raw_symbol real de
-        # ambas piernas en producción para confirmar el mecanismo exacto
-        # antes de decidir el fix.
+        # RESUELTO (2026-09-19, auditoría de bugs): el usuario detectó, en un
+        # export CSV del Ranking, 121 filas donde long_exchange ==
+        # short_exchange con Spread APR exactamente 0.0% (ej. SSV en okx vs
+        # okx, CIFR en gate vs gate, MUSTOCK en mexc vs mexc).
+        # compute_opportunities() nunca comprueba que las dos piernas de una
+        # oportunidad vengan de exchanges distintos — solo agrupa por
+        # símbolo normalizado y coge el mínimo/máximo APR del grupo (ver
+        # core/opportunities.py). Se dejó "en observación" varios
+        # despliegues porque el caso confirmado (Spread=0%, dos filas
+        # EMPATADAS en apr_pct — min()/max() de Python devuelven el mismo
+        # objeto como long_leg Y short_leg cuando hay empate, confirmado
+        # probándolo) siempre se hundía solo al fondo del ranking por no ser
+        # atractivo.
+        #
+        # Pero auditando el código se encontró que ESTE filtro, a diferencia
+        # de los tres de abajo (implausible_pairs/dead_liquidity/
+        # low_liquidity), se calculaba para el diagnóstico pero nunca se
+        # restaba de `opportunities` — así que si alguna vez dos filas
+        # DISTINTAS del mismo exchange (no empatadas) colisionan al
+        # normalizar, con un Spread APR llamativo en vez de 0%, esa fila se
+        # colaría en el Ranking principal como si fuera un arbitraje cruzado
+        # real, sin ningún aviso salvo abrir el expander de diagnóstico. Se
+        # descarta ya, mismo patrón que los otros tres filtros.
         same_exchange_pairs = [o for o in opportunities if o.long_exchange == o.short_exchange]
+        opportunities = [o for o in opportunities if o.long_exchange != o.short_exchange]
+
+        if same_exchange_pairs:
+            symbols_same_exchange = ", ".join(sorted({o.symbol for o in same_exchange_pairs}))
+            st.caption(
+                f"⚠️ {len(same_exchange_pairs)} oportunidad(es) descartada(s) del ranking por tener "
+                f"long y short en el MISMO exchange ({symbols_same_exchange}) — no es un arbitraje "
+                "cruzado real. Detalle en el diagnóstico de abajo."
+            )
 
         # Ver core/opportunities.py::has_implausible_price_pair — bug real
         # encontrado en producción (2026-09-16, confirmado con raw_symbol/
@@ -313,9 +327,9 @@ with tab_ranking:
 
         if not opportunities:
             st.info(
-                "Todas las oportunidades del top se descartaron — ver los avisos de arriba (Open "
-                "Interest $0 confirmado, Cuello de botella OI/Vol por debajo del piso de liquidez "
-                "y/o Price Spread implausible)."
+                "Todas las oportunidades del top se descartaron — ver los avisos de arriba (long/"
+                "short en el mismo exchange, Open Interest $0 confirmado, Cuello de botella OI/Vol "
+                "por debajo del piso de liquidez y/o Price Spread implausible)."
             )
 
         df = pd.DataFrame(
@@ -503,16 +517,20 @@ if low_liquidity:
 
 if same_exchange_pairs:
     with st.expander(
-        f"Diagnóstico: {len(same_exchange_pairs)} oportunidad(es) con long y short en el MISMO exchange"
+        f"Diagnóstico: {len(same_exchange_pairs)} oportunidad(es) descartada(s) por long y short "
+        "en el MISMO exchange"
     ):
         st.caption(
-            "compute_opportunities() no comprueba que las dos piernas vengan de exchanges "
-            "distintos — esto pasa cuando un solo exchange aporta 2+ filas para el mismo símbolo "
-            "normalizado (ver comentario justo encima de esta variable en este archivo, y "
-            "core/opportunities.py). Compara long_raw_symbol/short_raw_symbol: si son dos "
+            "Ver core/opportunities.py::compute_opportunities — no comprueba que las dos piernas "
+            "vengan de exchanges distintos — esto pasa cuando un solo exchange aporta 2+ filas para "
+            "el mismo símbolo normalizado (ver comentario en pages/1_Funding_Rates.py, justo antes "
+            "de calcular esta lista). Compara long_raw_symbol/short_raw_symbol: si son dos "
             "contratos reales distintos del mismo exchange (ej. un perpetuo y uno con "
             "vencimiento, o dos variantes de quote/margen), eso confirma el mecanismo — si son "
-            "IDÉNTICOS, sería otra cosa (duplicado literal en la respuesta del exchange/conector)."
+            "IDÉNTICOS, es un empate de apr_pct (duplicado literal en la respuesta del exchange/"
+            "conector, o dos filas idénticas del mismo contrato) — min()/max() de Python devuelven "
+            "el mismo objeto en ambos lados cuando hay empate, confirmado probándolo. Ya se "
+            "descartan del ranking (2026-09-19), esto es solo diagnóstico de por qué."
         )
         # Calculado aquí mismo, no hace falta que el usuario compare 123 filas
         # a ojo en un JSON anidado (que Streamlit pagina en rangos [0-99]/

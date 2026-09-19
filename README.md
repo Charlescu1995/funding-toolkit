@@ -999,9 +999,16 @@ siguen dando exactamente 0%. El diagnóstico `funding_rate_raw`/
 `funding_rate_calculado` se mantiene activo por si esta interpretación
 también resultara estar mal. Verificado con un test que usa los valores
 EXACTOS de los tres despliegues de arriba (`connectors/dex_grvt.py` +
-`core/normalize.py`). **Pendiente de confirmación en producción**: el
-usuario debe redesplegar y comprobar que el APR de GRVT ya no sale
-sistemáticamente en "+0.0%" para símbolos como AAVE/ADA/ARB.
+`core/normalize.py`).
+
+**Confirmado en producción (despliegue 2026-09-19 00:14 UTC)**: el mismo
+diagnóstico, ya con el fix desplegado, muestra `funding_rate_calculado`
+como `raw / 100` en vez de `raw × 1e-6` — ANTHROPIC raw="0.005" →
+calculado=5e-05 (antes 5e-09), AMD raw="0.0134" → calculado=0.000134
+(antes habría sido 1.34e-08), ARB raw="0.01" → calculado=0.0001 (antes
+1e-08). En APR: ANTHROPIC≈5.475%, AMD≈14.673%, ARB≈10.95% — coincide
+exactamente con lo previsto arriba. El "+0.0%" sistemático de GRVT queda
+resuelto.
 
 **Confirmado por el usuario en producción**: "La parte de GRVT parece
 arreglada" — el fix de arriba (quitar toda la división de mark_price/OI/
@@ -1333,10 +1340,11 @@ investigar todavía:
     "+0.0%" de funding**, incluyendo activos muy líquidos (LINK, ADA, AVAX,
     UNI, AAVE, ARB, JUP, con Cuello de botella OI de cientos de miles de
     dólares) — este era el mismo bug de `funding_rate_8h_curr` ×
-    `CENTIBEEPS_TO_DECIMAL`, **ya confirmado y corregido el 2026-09-18** (ver
-    sección de GRVT/funding más arriba: `/ 100.0` en vez de
-    `× CENTIBEEPS_TO_DECIMAL`). Pendiente de confirmación en producción con
-    un nuevo CSV tras el redespliegue.
+    `CENTIBEEPS_TO_DECIMAL`, corregido el 2026-09-18 (`/ 100.0` en vez de
+    `× CENTIBEEPS_TO_DECIMAL`) y **confirmado en producción el 2026-09-19**
+    (ver sección de GRVT/funding más arriba). Pendiente solo de un nuevo CSV
+    completo del Ranking tras el redespliegue, para confirmar que ya no
+    quedan las 47 filas en "+0.0%".
 
 ## Importante sobre dónde correr esto
 

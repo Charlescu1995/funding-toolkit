@@ -1761,6 +1761,96 @@ medias), el campo confirmado tiene prioridad sobre el nuevo. 37/37 tests
 pasan en el conjunto completo del proyecto tras este cambio, sin
 regresiones.
 
+## Resuelto (2026-09-19): Hallazgos #9 y #10 de la auditoría — filtro de Nado y ticker silencioso de MEXC/HTX
+
+Dos conectores distintos, resueltos a la vez.
+
+**Hallazgo #9 — Nado: un cambio de forma en el endpoint de status apagaba
+el filtro entero, en silencio — CONFIRMADO.** `connectors/dex_nado.py`
+cruza `/archive/v2/contracts` (precios/funding/OI) con
+`/gateway/v1/query?type=symbols` (el único sitio con `trading_status`) para
+descartar mercados no operables — el mismo problema ya visto con
+Aster/RiseX. El código anterior:
+
+```python
+symbols_map = (symbols_payload.get("data") or {}).get("symbols") or {}
+if not symbols_map:
+    logger.warning(...)
+...
+if symbols_map:  # <- si está vacío, se salta TODO el filtro
+    status = (symbols_map.get(base_currency) or {}).get("trading_status")
+    if status != "live":
+        continue
+```
+
+Si `data.symbols` llegaba vacío (el propio docstring del módulo documenta
+que esto YA ha pasado dos veces con otro endpoint de Nado — la API cambia
+de forma sin avisar), el filtro completo de "solo mercados `live`" se
+desactivaba para TODOS los mercados a la vez, no solo para el símbolo
+afectado — reintroduciendo exactamente el tipo de mercado fantasma/pausado/
+no lanzado que este conector se construyó para excluir. Solo quedaba
+constancia de un `logger.warning`, fácil de no ver, y el Ranking se
+llenaría de mercados no confirmados sin ningún indicio de que algo había
+fallado.
+
+**Fix**: en vez de asumir "sin datos de status = todo vale", se trata igual
+que la comprobación ya existente de `/archive/v2/contracts` vacío — un
+fallo real y ruidoso. Si `data.symbols` llega vacío se lanza un
+`RuntimeError` explícito. `core/data_service.py` ya captura cualquier
+excepción por conector y sigue con el resto de exchanges (ver el propio
+comentario de ese archivo: "un exchange que falla NO tira abajo a los
+demás"), así que esto no rompe la app — solo hace que Nado desaparezca del
+Ranking ese ciclo concreto (visible como error en la interfaz) en vez de
+colar mercados sin confirmar en silencio.
+
+**Verificado** con un test nuevo (`test_finding_9_and_10.py`): el caso
+normal (con `trading_status` real) no se ve afectado; un mercado con
+`trading_status` distinto de `"live"` se sigue excluyendo igual que antes;
+y `data.symbols` vacío (o la clave `data` ausente del todo, otra forma real
+de "cambió el shape") ahora lanza `RuntimeError` en vez de dejar pasar
+mercados sin confirmar.
+
+**Hallazgo #10 — MEXC/HTX: el endpoint de ticker tragaba en silencio una
+respuesta vacía o rota — CONFIRMADO.** En ambos conectores, los otros
+endpoints (`detail`/`funding_rate` en MEXC; `funding_rate`/`open_interest`
+en HTX) SÍ lanzan `RuntimeError` si vienen vacíos o con otra forma — pero
+el endpoint de ticker (de donde sale el OI entero de MEXC, y el
+mark_price/volumen de HTX) solo tenía un `... or []` silencioso:
+
+```python
+ticker_rows = ticker_payload.get("data") or []  # MEXC — sin aviso si viene vacío
+```
+```python
+ticker_rows = ticker_payload.get("ticks")
+if ticker_rows is None:
+    ticker_rows = ticker_payload.get("data") or []  # HTX — sin aviso si viene vacío
+```
+
+Si alguna vez ese endpoint responde vacío o cambia de forma (HTX ya lo ha
+hecho una vez, según el propio docstring del módulo: la clave de nivel
+superior pasó de `"data"` a `"ticks"`), las columnas que dependen de él
+quedan en `None` para TODO el exchange, sin ningún aviso — indistinguible
+de "este exchange simplemente no reporta esto".
+
+**Fix**: a diferencia del Hallazgo #9, aquí NO se convierte en
+`RuntimeError` — el `funding_rate` en sí sigue siendo válido y útil sin
+OI/mark_price/volumen (no es un filtro de seguridad que, al desactivarse,
+cuela datos falsos; es enriquecimiento que, al faltar, solo deja columnas
+en blanco). Se añadió un `logger.warning` explícito en ambos conectores
+cuando el ticker llega vacío, con las claves de nivel superior recibidas
+para poder diagnosticar un cambio de forma real.
+
+**Verificado** con el mismo test nuevo: el caso normal (ticker con filas)
+no dispara ningún aviso nuevo; un ticker vacío (`"data": []` en MEXC,
+`"ticks": []` en HTX) deja el `funding_rate` intacto pero OI/mark_price/
+volumen en `None`, y ahora SÍ queda registrado explícitamente; y una
+respuesta con la clave esperada ausente del todo también dispara el
+aviso. En HTX se confirmó además que el OI (que viene de un endpoint
+totalmente distinto, `swap_open_interest`) no se ve afectado por un
+ticker vacío — el fallo queda aislado a las columnas que de verdad
+dependen de ese endpoint. 46/46 tests pasan en el conjunto completo del
+proyecto tras este cambio, sin regresiones.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

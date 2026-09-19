@@ -178,6 +178,27 @@ class HtxConnector:
         ticker_rows = ticker_payload.get("ticks")
         if ticker_rows is None:
             ticker_rows = ticker_payload.get("data") or []
+        if not ticker_rows:
+            # Hallazgo #10 de la auditoría (2026-09-19), ver README: a
+            # diferencia de funding_rate/open_interest (que SÍ lanzan
+            # RuntimeError si vienen vacíos), este endpoint antes se quedaba
+            # en silencio -- si /market/detail/batch_merged responde vacío o
+            # cambia de forma otra vez (ya cambió una vez la clave de nivel
+            # superior de "data" a "ticks", ver docstring), close_by_code/
+            # turnover_by_code quedan vacíos y TODO el exchange pierde
+            # mark_price/volumen sin ningún aviso, indistinguible de "HTX
+            # simplemente no reporta esto". No se convierte en RuntimeError
+            # (el funding_rate en sí sigue siendo válido y útil sin estos
+            # campos, a diferencia del filtro de trading_status de Nado,
+            # donde dejar pasar sin filtrar sí colaba datos falsos) -- se
+            # deja constancia explícita para que deje de ser un fallo
+            # silencioso.
+            logger.warning(
+                "htx: /market/detail/batch_merged no trajo ninguna fila (ni en 'ticks' ni "
+                "en 'data') -- mark_price y volume_24h_usd quedarán en None para TODO el "
+                "exchange este ciclo (claves de nivel superior recibidas: %s)",
+                list(ticker_payload.keys()) if isinstance(ticker_payload, dict) else type(ticker_payload).__name__,
+            )
         close_by_code = {
             row["contract_code"]: row.get("close")
             for row in ticker_rows

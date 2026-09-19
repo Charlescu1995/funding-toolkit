@@ -148,6 +148,25 @@ class MexcConnector:
         ticker_resp.raise_for_status()
         ticker_payload = ticker_resp.json()
         ticker_rows = ticker_payload.get("data") or []
+        if not ticker_rows:
+            # Hallazgo #10 de la auditoría (2026-09-19), ver README: a
+            # diferencia de detail/funding_rate (que SÍ lanzan RuntimeError
+            # si vienen vacíos), este endpoint antes se quedaba en silencio
+            # con `or []` -- si /api/v1/contract/ticker responde vacío o
+            # cambia de forma, holdVol_by_symbol/volume_24h_by_symbol quedan
+            # vacíos y TODO el exchange pierde OI/volumen sin ningún aviso,
+            # indistinguible de "MEXC simplemente no reporta esto". No se
+            # convierte en RuntimeError (el funding_rate en sí sigue siendo
+            # válido y útil sin estos campos, a diferencia del filtro de
+            # trading_status de Nado, donde dejar pasar sin filtrar sí
+            # colaba datos falsos) -- se deja constancia explícita para que
+            # deje de ser un fallo silencioso.
+            logger.warning(
+                "mexc: /api/v1/contract/ticker no trajo ninguna fila en 'data' -- "
+                "open_interest_usd y volume_24h_usd quedarán en None para TODO el "
+                "exchange este ciclo (claves de nivel superior recibidas: %s)",
+                list(ticker_payload.keys()) if isinstance(ticker_payload, dict) else type(ticker_payload).__name__,
+            )
         hold_vol_by_symbol = {
             row["symbol"]: row.get("holdVol")
             for row in ticker_rows

@@ -155,10 +155,27 @@ class NadoConnector:
         symbols_payload = symbols_resp.json()
         symbols_map = (symbols_payload.get("data") or {}).get("symbols") or {}
         if not symbols_map:
-            logger.warning(
-                "nado: /gateway/v1/query?type=symbols no trajo 'data.symbols' — no se podrá "
-                "filtrar por trading_status, se usarán todos los mercados perp tal cual "
-                "(cambió la forma de la respuesta, ver README)"
+            # Hallazgo #9 de la auditoría (2026-09-19), ver README: antes esto
+            # solo avisaba con un logger.warning y dejaba pasar TODOS los
+            # mercados sin filtrar por trading_status -- si este endpoint
+            # cambia de forma otra vez (ya ha pasado dos veces con el otro
+            # endpoint de Nado, ver docstring del módulo), el filtro de
+            # "solo mercados live" se apagaba entero, en silencio,
+            # reintroduciendo exactamente los mercados fantasma/pausados/no
+            # lanzados que este conector se construyó para excluir. En vez de
+            # adivinar que "sin datos de status = todo vale", se trata igual
+            # que la comprobación ya existente de /archive/v2/contracts
+            # vacío: un fallo real y ruidoso. data_service.py ya captura
+            # cualquier excepción por conector y sigue con el resto de
+            # exchanges (ver core/data_service.py), así que esto no tira la
+            # app -- solo dice claramente "Nado no disponible este ciclo" en
+            # vez de colar mercados no confirmados en el Ranking.
+            raise RuntimeError(
+                "nado: /gateway/v1/query?type=symbols no trajo 'data.symbols' -- sin esto no "
+                "se puede confirmar el trading_status de NINGÚN mercado, así que no se puede "
+                "filtrar con seguridad (cambió la forma de la respuesta, ver README/docstring "
+                "de este módulo). Se descarta el ciclo entero de Nado en vez de dejar pasar "
+                "mercados sin confirmar."
             )
 
         out: list[FundingRate] = []
@@ -178,11 +195,15 @@ class NadoConnector:
                 continue
 
             # Ver docstring: cruce con /query?type=symbols para descartar
-            # mercados no operables (mismo problema que Aster/RiseX).
-            if symbols_map:
-                status = (symbols_map.get(base_currency) or {}).get("trading_status")
-                if status != "live":
-                    continue
+            # mercados no operables (mismo problema que Aster/RiseX). Para
+            # llegar aquí ya se confirmó arriba que symbols_map no está
+            # vacío (Hallazgo #9) -- un base_currency concreto ausente del
+            # mapa (símbolo nuevo que /contracts trae y /symbols todavía no)
+            # sigue tratándose como "no confirmado como live" y se descarta,
+            # no se asume que sea operable.
+            status = (symbols_map.get(base_currency) or {}).get("trading_status")
+            if status != "live":
+                continue
 
             rate_24h_raw = row.get("funding_rate")
             mark_price_raw = row.get("mark_price")

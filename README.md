@@ -1111,14 +1111,26 @@ estilo que el de OI $0) que enseña qué se descartó y por qué. Verificado
 con un test que usa los valores EXACTOS del panel real (CAT, RTX, HK50,
 XIAOMI, PURR se descartan; CAKE, BERA, APEX, NEIRO se conservan).
 
-**Hallazgo secundario, no tocado todavía (bajo impacto)**: el conector de
-Lighter (`connectors/dex_lighter.py`) guarda `raw_symbol=str(market_id)` —
-un ID numérico interno ("20", "86"...) en vez de un ticker legible. No
-causa el bug de arriba (el campo `symbol`, que es el que se usa para
-emparejar oportunidades, sí viene correcto — "BERA", "APEX"), pero hace
-que el nuevo panel de diagnóstico enseñe cosas como `raw=20` para Lighter,
-que no dice nada por sí solo. Cosmético por ahora, pendiente si molesta en
-la práctica.
+**Hallazgo secundario — RESUELTO (2026-09-19)**: el conector de Lighter
+(`connectors/dex_lighter.py`) guardaba `raw_symbol=str(market_id)` — un ID
+numérico interno ("20", "86"...) en vez de un ticker legible. No causaba
+el bug de arriba (el campo `symbol`, que es el que se usa para emparejar
+oportunidades, sí venía correcto — "BERA", "APEX"), pero hacía que
+cualquier panel de diagnóstico que enseñe `raw_symbol` mostrara cosas como
+`raw=20` para Lighter, sin decir nada por sí solo. Confirmado en vivo
+(WebFetch a `/funding-rates` y `/orderBookDetails`) que ambos endpoints ya
+traen, cada uno por su lado, un campo `symbol` con el ticker legible (ej.
+"APT", "XLM", "POPMART") y que coincide exactamente entre los dos para el
+mismo `market_id` — no hay un identificador "más crudo" por debajo de ese
+ticker. Cambiado a `raw_symbol=symbol`, mismo patrón que ya usa
+Hyperliquid cuando tampoco hay nada más nativo que el propio ticker. Tests
+de regresión con valores reales confirmados en vivo
+(`test_lighter_raw_symbol.py`). De paso se vio en `orderBookDetails` un
+campo `status` ("active"/"inactive") que este conector no usa todavía —
+no se tocó (fuera de alcance de este arreglo), pero queda anotado por si
+algún mercado "inactive" se está colando en el ranking como si operara
+con normalidad, mismo patrón que el bug real de `status` en Extended (ver
+más abajo).
 
 **Actualización — nuevo bug real, distinto: mercados fantasma en Extended
 (no relacionado con el choque de símbolos de arriba).** Con el fix
@@ -1430,10 +1442,10 @@ investigar todavía:
     regresión (`test_kucoin_negative_oi_guard.py`) con los valores reales
     de producción de SOLUSDM + SOLUSDTM: el inverso se excluye del todo, el
     lineal sigue sano, y la guardia de respaldo se sigue probando por
-    separado para una causa hipotética distinta. **Pendiente**: confirmar
-    en el próximo CSV/log que SOL ya aparece en el Ranking usando solo
-    SOLUSDTM (o que sigue sin aparecer, pero ya no por OI negativo sino por
-    no tener pareja lineal-a-lineal rentable).
+    separado para una causa hipotética distinta. **Confirmado en producción
+    (2026-09-19)**: SOL ya aparece en el Ranking con OI/Volumen positivos y
+    con sentido (ej. OI long $736 mil, OI short $1,9 M, Vol 24h $362 mil /
+    $4,2 M) — sin rastro de OI negativo.
   - **Las 47 filas donde participa GRVT muestran las 47 exactamente
     "+0.0%" de funding**, incluyendo activos muy líquidos (LINK, ADA, AVAX,
     UNI, AAVE, ARB, JUP, con Cuello de botella OI de cientos de miles de

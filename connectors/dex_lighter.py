@@ -51,6 +51,29 @@ lee del mismo `depth_rows` que ya se recorre para mark price/OI, sin
 ninguna llamada de red adicional.
 
     volume_24h_usd = daily_quote_token_volume   (directo, sin conversión)
+
+--- Nota sobre `raw_symbol` (arreglado 2026-09-19, cosmético, sin impacto
+    en el ranking) ---
+
+Antes se usaba `raw_symbol=str(market_id)` (ej. "155", "29") — un ID
+numérico interno, ilegible en cualquier panel de diagnóstico que muestre
+`raw_symbol` (ver por ejemplo el patrón de `has_implausible_price_pair()`
+en core/opportunities.py, que lo saca en sus mensajes). Confirmado en vivo
+que tanto `/funding-rates` como `/orderBookDetails` ya traen, cada uno por
+su lado, un campo `symbol` con el ticker legible de Lighter (ej. "APT",
+"XLM", "POPMART", "MAGS") — y que los dos coinciden exactamente para el
+mismo `market_id` (no hay un identificador "más crudo" por debajo de ese
+ticker, a diferencia de otros exchanges donde `raw_symbol` sí difiere del
+`symbol` normalizado). Se cambia a `raw_symbol=symbol` — mismo patrón que
+ya usa Hyperliquid (`connectors/dex_hyperliquid.py`) cuando tampoco hay
+nada más nativo que el propio ticker.
+
+De paso, se vio en `orderBookDetails` un campo `status` ("active"/
+"inactive") que este conector no usa todavía — no se tocó (fuera del
+alcance de este arreglo cosmético), pero queda para investigar si algún
+mercado "inactive" se está colando en el ranking como si operara con
+normalidad, mismo patrón que el bug real de `status` en Extended (ver
+README).
 """
 
 from __future__ import annotations
@@ -170,7 +193,7 @@ class LighterConnector:
                     exchange="lighter",
                     venue_type=VenueType.DEX,
                     symbol=symbol,
-                    raw_symbol=str(market_id),
+                    raw_symbol=symbol,
                     funding_rate=float(rate),
                     interval_hours=INTERVAL_HOURS,
                     mark_price=mark_price,

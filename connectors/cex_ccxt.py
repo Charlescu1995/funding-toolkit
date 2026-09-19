@@ -18,6 +18,7 @@ import re
 from datetime import datetime, timezone
 
 import ccxt
+import requests
 
 from .base import FundingRate, VenueType
 from .cex_htx import htx
@@ -25,6 +26,10 @@ from .cex_kucoin import kucoin
 from .cex_mexc import mexc
 
 logger = logging.getLogger(__name__)
+
+# Ver CexConnector._fetch_gate_open_interest_usd más abajo — endpoint REST
+# propio de gate.io (bypass de ccxt) para el Open Interest en USD.
+GATE_CONTRACT_STATS_URL = "https://api.gateio.ws/api/v4/futures/usdt/contract_stats"
 
 # Intervalo de liquidación por defecto de cada CEX, en horas — SOLO se usa
 # como fallback cuando ccxt no trae un intervalo real por símbolo en la
@@ -336,6 +341,21 @@ class CexConnector:
         out: dict[str, float] = {}
         errors: dict[str, str] = {}
         for raw_symbol, mark_price in requests:
+            # Ver _fetch_gate_open_interest_usd — gate es un caso especial
+            # descubierto verificando este mismo export CSV (2026-09-19):
+            # ccxt.gate().has['fetchOpenInterest'] es False (mismo hueco que
+            # Aster, ver README), así que fetch_open_interest() de ccxt
+            # SIEMPRE lanza NotSupported para gate, sea cual sea el símbolo
+            # — nunca es un fallo puntual. A diferencia de Aster (donde el
+            # bypass REST directo también falló, 400 en BTCUSDT), el REST
+            # propio de gate SÍ expone el Open Interest ya resuelto en USD.
+            if self.ccxt_id == "gate":
+                try:
+                    out[raw_symbol] = self._fetch_gate_open_interest_usd(raw_symbol)
+                except Exception as exc:
+                    errors[raw_symbol] = f"{type(exc).__name__}: {exc}"
+                continue
+
             try:
                 info = self._client.fetch_open_interest(raw_symbol)
             except Exception as exc:
@@ -371,6 +391,52 @@ class CexConnector:
             out[raw_symbol] = float(value)
 
         return out, errors
+
+    def _fetch_gate_open_interest_usd(self, raw_symbol: str) -> float:
+        """
+        Bypass de ccxt para el Open Interest de gate (CONFIRMADO en vivo,
+        2026-09-19, verificando por qué el export CSV del Ranking nunca
+        traía OI para ninguna pierna en `gate` pese a estar en
+        CEX_FACTORY_BY_NAME): `ccxt.gate().has['fetchOpenInterest']` es
+        `False` — no es un fallo intermitente ni un símbolo concreto, ccxt
+        genuinamente no lo implementa para este exchange (mismo hueco que
+        Aster, ver README). `fetch_open_interest_usd()` de arriba llamaría
+        a `self._client.fetch_open_interest()`, que para gate SIEMPRE
+        lanza `NotSupported`.
+
+        A diferencia de Aster (donde el bypass REST directo también se
+        probó y falló con 400 incluso en BTCUSDT — ver README), el REST
+        propio de gate SÍ expone el Open Interest ya resuelto en USD:
+        `GET /api/v4/futures/usdt/contract_stats?contract=<id>&interval=5m&limit=1`
+        confirmado en vivo contra EMBER_USDT devolviendo
+        `open_interest_usd=185664.336` (y de paso, `last_funding_rate:
+        "-0.02"` — el mismo -2%/hora tope que ya se veía capado a
+        -17.520% de APR en ese mismo export CSV, confirmación cruzada de
+        que este endpoint es el dato real del mismo contrato).
+
+        `raw_symbol` llega en formato unificado de ccxt (ej.
+        "EMBER/USDT:USDT"), pero el endpoint de gate quiere su id nativo
+        con guion bajo (ej. "EMBER_USDT", el campo `name` crudo de la API
+        de gate — confirmado leyendo `parse_contract_market()` en el
+        propio código fuente de ccxt, que asigna `market['id'] = name` sin
+        transformar). Se resuelve con `self._client.market(raw_symbol)['id']`,
+        que ccxt ya tiene cacheado tras el `fetch_funding_rates()` masivo
+        (no hace falta una llamada de red aparte solo para esto).
+        """
+        contract_id = self._client.market(raw_symbol)["id"]
+        resp = requests.get(
+            GATE_CONTRACT_STATS_URL,
+            params={"contract": contract_id, "interval": "5m", "limit": 1},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+        if not rows:
+            raise RuntimeError(f"gate contract_stats sin filas para {contract_id}")
+        value = rows[0].get("open_interest_usd")
+        if value is None:
+            raise RuntimeError(f"gate contract_stats sin open_interest_usd para {contract_id}")
+        return float(value)
 
 
 def binance() -> CexConnector:

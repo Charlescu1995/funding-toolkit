@@ -2264,6 +2264,141 @@ distintos que confirma que el APR final sigue siendo `apy × 100`). El #22
 no tiene código que testear (solo un comentario). 105/105 tests pasan en el
 conjunto completo del proyecto tras este cambio, sin regresiones.
 
+### Hallazgo nuevo (2026-09-19, no viene de la auditoría): `gate` nunca traía Open Interest del top N — mismo hueco de ccxt que Aster, pero SÍ se puede arreglar
+
+Verificando el export CSV completo del Ranking que pidió el usuario ("comprueba
+que todo esté correcto aquí también"), todos los checks automatizados (mismo
+exchange long/short, Price Spread implausible, OI $0 confirmado, piso de
+liquidez, Cuello de botella/Lado coherentes con las piernas, Spread APR = Short
+− Long) salieron limpios en las 683 filas. Las dos filas que parecían raras a
+simple vista se confirmaron con datos en vivo, no eran bugs:
+
+- **EMBER (gate long, rank #1 del ranking, Spread APR 17.563,8%)**: confirmado
+  contra la API real de gate.io que EMBER_USDT tiene intervalo de funding de 1h
+  y un **cap del propio exchange del 2%/hora** en el funding rate
+  (`funding_rate_limit: "0.02"` en `/api/v4/futures/usdt/contracts/EMBER_USDT`).
+  -17.520% es exactamente ese cap anualizado (0,02 × 8760 × 100) — la tasa
+  cruda tocó su techo en el momento del snapshot (`last_funding_rate: "-0.02"`
+  confirmado también vía `contract_stats`, ver más abajo). No es un bug de
+  escala del proyecto, es un dato real y extremo — y volátil por el intervalo
+  de 1h (para cuando se verificó ya había bajado a -0,84%/hora).
+- **ZEC (hyperliquid long, OI ~$800M)**: confirmado por Coinglass que ZEC tiene
+  ~$3,15B de Open Interest agregado en todos los exchanges en este momento —
+  $800M en uno de los venues más grandes (Hyperliquid) es plausible, no un
+  error de parseo.
+
+Investigando por qué **ninguna** fila con `gate` como pierna traía OI Depth
+pese a que `gate` está en `CEX_FACTORY_BY_NAME` (debería pedirse para el top
+10 — `OI_ENRICH_TOP_N` en `pages/1_Funding_Rates.py`) se encontró un hueco
+real: **`ccxt.gate().has['fetchOpenInterest']` es `False`** — confirmado en
+vivo, exactamente el mismo problema ya documentado para Aster más arriba en
+esta misma sección. `CexConnector.fetch_open_interest_usd()` llama a
+`self._client.fetch_open_interest(raw_symbol)`, que para gate **siempre**
+lanza `NotSupported`, sea cual sea el símbolo — no es un fallo puntual, es
+estructural. En el CSV verificado, las dos únicas piernas de `gate` dentro del
+top 10 (EMBER en rank #1, COOL en rank #6) salían las dos con OI "—" por este
+motivo.
+
+A diferencia de Aster (donde se probó también un bypass REST directo y falló
+con 400 incluso en un símbolo real y activo como BTCUSDT — ver más arriba, así
+que se aceptó como límite real del proyecto), aquí el bypass **sí funciona**:
+el REST propio de gate.io expone el Open Interest ya resuelto en USD —
+confirmado en vivo contra
+`GET /api/v4/futures/usdt/contract_stats?contract=EMBER_USDT&interval=5m&limit=1`
+→ `open_interest_usd: 185664.336` (con `last_funding_rate: "-0.02"` en la misma
+respuesta — confirmación cruzada contra el propio EMBER del punto anterior, es
+el mismo contrato real).
+
+**Fix**: `CexConnector._fetch_gate_open_interest_usd()` (nuevo, en
+`connectors/cex_ccxt.py`) — cuando `self.ccxt_id == "gate"`,
+`fetch_open_interest_usd()` bypasea `self._client.fetch_open_interest()` (que
+fallaría siempre) y llama directamente a `contract_stats`, resolviendo primero
+el id nativo del contrato (ej. `"EMBER_USDT"`, con guion bajo) a partir del
+símbolo unificado de ccxt (ej. `"EMBER/USDT:USDT"`) vía
+`self._client.market(raw_symbol)["id"]` — confirmado leyendo
+`parse_contract_market()` en el propio código fuente de ccxt, que asigna
+`market["id"] = name` sin transformar, y ccxt ya tiene los markets cacheados
+tras el `fetch_funding_rates()` masivo, así que esto no cuesta ninguna llamada
+de red aparte. Igual que el resto del proyecto: si `contract_stats` no trae
+filas o falta `open_interest_usd`, se reporta como error explícito por símbolo
+(visible en el expander de diagnóstico), nunca como un "—" mudo ni como un
+0.0 inventado. El resto de `CEX_FACTORY_BY_NAME` (binance/bybit/okx/
+bitget/aster) no se ve afectado — el bypass solo aplica a `gate`.
+
+**Verificado** con `test_gate_open_interest_rest_bypass.py` (6 tests: el
+bypass evita por completo `ccxt.fetch_open_interest()` para gate, el id nativo
+se resuelve vía `self._client.market()` y no por parseo del símbolo, filas
+vacías y campo `open_interest_usd` ausente se reportan como error explícito
+en vez de perderse en silencio, un fallo de red se reporta por símbolo sin
+tirar el resto del top N, y el resto de exchanges de `CEX_FACTORY_BY_NAME`
+—probado con bitget— sigue usando el camino normal de ccxt sin verse
+afectado). 113/113 tests pasan en el conjunto completo del proyecto tras este
+cambio, sin regresiones.
+
+### Hallazgo #17 (auditoría 2026-09-19) — RESUELTO parcialmente a propósito: sin tabla de alias para símbolos con prefijo de multiplicador ("1000PEPE")
+
+La auditoría original lo marcó "SOSPECHOSO": ningún sitio de `core/` tiene una
+tabla de alias de símbolos (solo el caso puntual XBT→BTC en `cex_kucoin.py`),
+así que un mismo activo listado como "1000PEPE" en un exchange y "PEPE" en
+otro nunca se emparejaría en `compute_opportunities()` (que agrupa por símbolo
+EXACTO) — oportunidades reales perdidas en silencio, sin error ni aviso.
+
+**Confirmado con datos reales** verificando el mismo export CSV del Ranking
+que motivó el resto de esta sección: PEPE (`okx +10,9%` / `mexc +31,0%`) y
+1000PEPE (`edgex +10,9%` / `extended +30,7%`) son el mismo activo — APR casi
+idéntico en las dos piernas de cada fila (el funding rate en % no depende de
+si el contrato agrupa 1 o 1000 tokens) — pero salían como dos oportunidades
+separadas sin ninguna relación aparente entre sí.
+
+**El riesgo real, y por qué no es un simple alias**: el propio mark_price de
+la pierna con multiplicador normalmente está cotizado a la escala del LOTE
+completo (1000 PEPE), no del token suelto — confirmado así para ApeX
+contrastando `openInterest × markPrice` contra un notional plausible (ver
+`connectors/dex_apex.py`). Si solo se hiciera un alias de símbolo sin tocar
+nada más, el Price Spread de esas filas saldría con un número inventado
+(~99.900%, o peor, algo pequeño pero falso si por casualidad cayera bajo
+`IMPLAUSIBLE_SPREAD_PCT`) — justo la clase de bug que el resto de esta sección
+lleva toda la auditoría evitando. Confirmarlo en vivo, exchange por exchange
+(edgeX, extended, MEXC, Bitget, Gate...), para poder ajustar el precio con
+seguridad es un trabajo bastante mayor que el propio alias — se le planteó la
+disyuntiva al usuario y se decidió ir por la opción segura ahora, dejando el
+ajuste de precio para más adelante si hace falta.
+
+**Fix (`core/normalize.py`)**: `_canonical_symbol()` recorta un prefijo de
+multiplicador de una lista CERRADA de prefijos conocidos (`1000`, `10000`,
+`100000`, `1000000`, `1M` — los mismos que ya aparecen en producción en este
+proyecto: 1000000MOG, 1000RATS, 1000PEPE, 1000BONK, 1MBABYDOGE, 1000CHEEMS,
+1000SHIB, 1000FLOKI, ver el export CSV), NO un regex genérico tipo `^\d+` —
+símbolos reales de ese mismo universo como "0G" (0G Labs) o "2Z" empiezan por
+dígito sin ser un multiplicador, y un regex genérico los rompería (verificado:
+ninguno de esos dos coincide con la lista cerrada). Se aplica una sola vez, en
+`normalize()` — el único funnel por el que pasan todos los `FundingRate` de
+todos los conectores — así que ningún conector nuevo puede olvidarse de
+aplicarlo. El símbolo canónico (sin prefijo) es el que ve
+`compute_opportunities()`, y el multiplicador queda registrado aparte en
+`NormalizedRate.symbol_multiplier` (1.0 si no tenía prefijo).
+
+`core/scoring.py::price_spread()` usa ese campo para negarse a comparar el
+mark_price de dos piernas con `symbol_multiplier` distinto — devuelve
+`spread_pct=None` directamente en vez de calcular nada, así que esas filas
+salen con Price Spread "—" en la interfaz (mismo criterio que mark_price
+ausente o IMPLAUSIBLE_SPREAD_PCT). El Spread APR, que es el dato principal del
+ranking, no se ve afectado en ningún caso.
+
+**Verificado** con `test_finding_17_symbol_multiplier.py` (10 tests):
+`_canonical_symbol()` recorta bien los 8 prefijos vistos en producción, prefiere
+el prefijo más largo cuando hay solape (1000000 sobre 1000), y NO toca "0G"/
+"2Z"/"4STOCK"; `normalize()` deja el símbolo canónico y el multiplicador
+correctos; `price_spread()` da `None` cuando los multiplicadores difieren
+(incluso si el ratio de precios "cuadra" con lo esperado — no se asume, se
+exige confirmación en vivo que hoy no existe), sigue calculándose con
+normalidad si las dos piernas comparten el mismo multiplicador, y no cambia
+nada cuando ninguna de las dos tiene prefijo; y un caso end-to-end que
+confirma que PEPE (okx/mexc) y 1000PEPE (edgex/extended) ahora SÍ se
+emparejan en una única oportunidad vía `compute_opportunities()`. 123/123
+tests pasan en el conjunto completo del proyecto tras este cambio, sin
+regresiones.
+
 ## Importante sobre dónde correr esto
 
 Este proyecto se ha construido en un entorno cloud con acceso a internet restringido

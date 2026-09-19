@@ -191,15 +191,36 @@ def price_spread(long_rate: NormalizedRate, short_rate: NormalizedRate) -> Price
     intervalo.
 
     None cuando a cualquiera de las dos piernas le falta el mark_price (pasa,
-    p.ej., si algún conector no lo trae), cuando el precio long es 0, o
-    cuando el resultado supera IMPLAUSIBLE_SPREAD_PCT (ver nota "Guardia de
-    cordura" en el docstring del módulo) — no se inventa ni se enseña un
-    número que no nos creemos, se deja como "—" en la interfaz, igual que
-    con OI/volumen ausente.
+    p.ej., si algún conector no lo trae), cuando el precio long es 0, cuando
+    las dos piernas tienen un multiplicador de contrato distinto (ver nota
+    "Símbolos con multiplicador de contrato" abajo), o cuando el resultado
+    supera IMPLAUSIBLE_SPREAD_PCT (ver nota "Guardia de cordura" en el
+    docstring del módulo) — no se inventa ni se enseña un número que no nos
+    creemos, se deja como "—" en la interfaz, igual que con OI/volumen
+    ausente.
+
+    --- Símbolos con multiplicador de contrato (Hallazgo #17 de la
+    auditoría, 2026-09-19) ---
+    `core/normalize.py` empareja símbolos como "1000PEPE" y "PEPE" bajo el
+    mismo símbolo canónico ("PEPE") para que compute_opportunities() SÍ los
+    cruce — confirmado con datos reales que son el mismo activo (APR casi
+    idéntico en ambos). Pero el propio mark_price de la pierna con
+    multiplicador normalmente está cotizado a la escala del LOTE completo
+    (1000 PEPE), no del token suelto — confirmado así para ApeX (ver
+    connectors/dex_apex.py), sin confirmación en vivo exchange por exchange
+    para el resto. Comparar esos dos mark_price tal cual daría un Price
+    Spread inventado (~99.900%, o peor, un número pequeño pero falso si por
+    casualidad cae bajo IMPLAUSIBLE_SPREAD_PCT) — así que si `long_rate` y
+    `short_rate` traen un `symbol_multiplier` distinto, se devuelve
+    spread_pct=None directamente, sin ni siquiera calcularlo. El Spread APR
+    (el dato principal) no se ve afectado — el funding rate en % no depende
+    de la escala del contrato.
     """
     long_price = long_rate.mark_price
     short_price = short_rate.mark_price
     if long_price is None or short_price is None or long_price == 0:
+        return PriceSpread(long_price=long_price, short_price=short_price, spread_pct=None)
+    if long_rate.symbol_multiplier != short_rate.symbol_multiplier:
         return PriceSpread(long_price=long_price, short_price=short_price, spread_pct=None)
     spread_pct = abs(short_price - long_price) / long_price * 100
     if spread_pct > IMPLAUSIBLE_SPREAD_PCT:

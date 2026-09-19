@@ -1387,43 +1387,53 @@ $1.000 (el caso B2/TRUST) ya no se cuelan.
 De paso, estudiando el mismo CSV aparecieron dos hallazgos más sin
 investigar todavía:
 
-  - **SOL en kucoinfutures muestra OI long negativo — investigado
-    (2026-09-19), guardia + diagnóstico añadidos, causa raíz aún sin
-    confirmar**: visto dos veces en producción (−$616.481.571 y, ~15 min
-    después, −$618.445.974,96 — mismo orden de magnitud pero no el mismo
-    valor, así que es corrupción recurrente en vivo, no un dato congelado).
-    `kucoinfutures` no pasa por ningún enriquecimiento aparte de OI (no
-    está en `CEX_FACTORY_BY_NAME`), así que el valor sale directo de
-    `openInterest × multiplier × markPrice` en `cex_kucoin.py`, con los
-    tres factores parseados tal cual del mismo payload del fetch masivo —
-    para que el producto dé negativo, KuCoin tuvo que mandar ya negativo
-    alguno de los tres, nuestro parseo (conversiones `float()` directas)
-    no puede invertir un signo. Se confirmó en vivo (WebFetch) que
-    SOLUSDTM viene sano ahora mismo (`openInterest="12632439"`,
-    `multiplier=0.1`, `markPrice=113.765` → ~$143,7M positivo) — no se
-    pudo reproducir a demanda. Se intentó también escanear el array
-    completo de contratos buscando el mismo patrón en otros símbolos, pero
-    salió poco fiable: WebFetch resumió/truncó la respuesta (pedirle el
-    total confirmó que solo veía 36 de varios cientos de contratos reales),
-    así que ese "no se encontró nada" se descartó como conclusión, no se
-    dio por bueno.
+  - **SOL en kucoinfutures muestra OI long negativo — RESUELTO
+    (2026-09-19), causa raíz confirmada con datos reales de producción**:
+    visto tres veces en producción (−$616.481.571, −$618.445.974,96,
+    −$613.841.851,68 — mismo orden de magnitud, no un dato congelado). Se
+    añadió primero una guardia + `logger.warning` con el payload crudo (sin
+    saber aún la causa), y el siguiente despliegue trajo el culpable real
+    en el log:
 
-    **Sin el payload crudo del momento exacto en que pasa, no hay
-    evidencia para señalar cuál de los tres factores es el culpable** —
-    así que, en vez de adivinarlo, se aplicó el mismo criterio de siempre
-    en este proyecto (evidencia antes que arreglo): (1) guardia en
-    `cex_kucoin.py` que descarta a `None` cualquier `open_interest_usd`
-    calculado negativo, en vez de dejarlo pasar dependiendo por
-    coincidencia de que el piso de liquidez lo cace, y (2)
-    `logger.warning` con el payload crudo completo (`openInterest`,
-    `multiplier`, `markPrice`) de cualquier contrato que dispare esto, para
-    que el PRÓXIMO despliegue en el que se repita traiga por fin los tres
-    valores crudos en el log y se pueda cerrar con causa confirmada.
-    Test de regresión sintético (`test_kucoin_negative_oi_guard.py`, no
-    afirma la causa real, solo prueba que la guardia y el log funcionan
-    sea cual sea el factor que venga mal) + caso de control con los valores
-    sanos reales de SOLUSDTM confirmados en vivo. **Pendiente**: que
-    vuelva a pasar con el fix desplegado, y pegar el log de ese momento.
+        kucoinfutures DIAGNÓSTICO OI negativo (4 contrato(s)): {
+          "ETHUSDM": {"openInterest_raw": "24974631", "multiplier_raw": -1.0, "markPrice_raw": 2608.06, ...},
+          "SOLUSDM": {"openInterest_raw": "5424548",  "multiplier_raw": -1.0, "markPrice_raw": 113.326, ...},
+          "XBTUSDM": {"openInterest_raw": "46529511", "multiplier_raw": -1.0, "markPrice_raw": 81148.8, ...},
+          "XRPUSDM": {"openInterest_raw": "7629466",  "multiplier_raw": -1.0, "markPrice_raw": 1.3995,  ...}
+        }
+
+    El símbolo real no era "SOLUSDTM" (el lineal, investigado primero, que
+    siempre vino sano) — era **"SOLUSDM"** (sin la "T"), un contrato
+    DISTINTO. Confirmado en vivo vía WebFetch al endpoint de detalle
+    (`GET /api/v1/contracts/SOLUSDM` — el listado completo se trunca sin
+    avisar, un intento anterior con él dio un falso "no existe"):
+    `baseCurrency=SOL, quoteCurrency=USD, settleCurrency=SOL,
+    multiplier=-1.0, isInverse=true`. Es un contrato **inverso**
+    (coin-margined, P&L y margen en SOL) que comparte `baseCurrency=SOL`
+    con el lineal (USDT-margined) — este conector los normalizaba al mismo
+    `symbol="SOL"`, así que `compute_opportunities()` los agrupaba y
+    comparaba como si fueran el mismo mercado. La fórmula `openInterest ×
+    multiplier × markPrice` solo es válida para contratos lineales; en un
+    inverso, `multiplier=-1.0` es un centinela de "esto es inverso", no una
+    cantidad real, y no hay una fórmula de conversión a USD confirmada
+    (la documentación de KuCoin es una SPA — WebFetch solo pudo leer el
+    esqueleto de navegación, no el cuerpo).
+
+    **Fix**: se excluyen del todo los contratos con `isInverse=True` (o
+    `multiplier<0` como señal de refuerzo) en `cex_kucoin.py`, en vez de
+    inventar su conversión a USD. Es la decisión correcta más allá del bug
+    de OI: un mercado coin-margined no es la misma operación que uno
+    USDT-margined, así que no debían tratarse como el mismo símbolo "SOL"
+    de todos modos. La guardia genérica de OI negativo se mantiene como
+    red de seguridad para cualquier otra causa futura, ahora marcada
+    "inesperada" en el log si dispara sin `isInverse=True`. Tests de
+    regresión (`test_kucoin_negative_oi_guard.py`) con los valores reales
+    de producción de SOLUSDM + SOLUSDTM: el inverso se excluye del todo, el
+    lineal sigue sano, y la guardia de respaldo se sigue probando por
+    separado para una causa hipotética distinta. **Pendiente**: confirmar
+    en el próximo CSV/log que SOL ya aparece en el Ranking usando solo
+    SOLUSDTM (o que sigue sin aparecer, pero ya no por OI negativo sino por
+    no tener pareja lineal-a-lineal rentable).
   - **Las 47 filas donde participa GRVT muestran las 47 exactamente
     "+0.0%" de funding**, incluyendo activos muy líquidos (LINK, ADA, AVAX,
     UNI, AAVE, ARB, JUP, con Cuello de botella OI de cientos de miles de

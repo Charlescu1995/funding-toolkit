@@ -77,54 +77,67 @@ acepta únicamente ese valor exacto, igual que con `orderBookState` en
 Backpack o `trading_status` en Nado, por si existen otros estados (pausado,
 deslistado...) no vistos todavía en este único ejemplo.
 
---- Nota sobre `openInterest` NEGATIVO (bug real en producción, 2026-09-19,
-    símbolo SOL — investigación abierta, todavía sin causa raíz confirmada)
-    ---
+--- Nota sobre `openInterest` NEGATIVO — CAUSA RAÍZ CONFIRMADA (2026-09-19,
+    símbolo SOL) ---
 
-El usuario reportó, dos veces en la misma sesión de trabajo (con ~10-15
-minutos de diferencia), que SOLUSDTM daba un `open_interest_usd` calculado
-imposible: −$616.481.571 la primera vez, −$618.445.974,96 la segunda —
-mismo orden de magnitud, pero NO el mismo valor exacto, así que no es un
-dato congelado/cacheado, es corrupción real y recurrente en vivo. En ambos
-casos el valor negativo acabó descartando la oportunidad del Ranking por
-pura coincidencia (el piso de liquidez mínima — ver más abajo en el README
-— descarta cualquier valor por debajo de $1.000, y cualquier negativo
-cumple eso trivialmente), pero eso tapaba el síntoma sin explicar la causa.
+El usuario reportó un `open_interest_usd` imposible en el símbolo "SOL"
+tres veces en la misma sesión de trabajo (−$616.481.571, −$618.445.974,96
+y −$613.841.851,68 — mismo orden de magnitud pero no el mismo valor,
+señal de que era algo recurrente en vivo, no un dato congelado). Con la
+guardia + el log de diagnóstico añadidos más abajo, el propio log de
+producción trajo el payload crudo culpable en el redespliegue siguiente:
 
-Investigado en vivo (WebFetch, mismo método que el resto de este
-conector): en el momento de la investigación SOLUSDTM venía sano
-(`openInterest="12632439"`, `multiplier=0.1`, `markPrice=113.765` →
-~$143,7M positivo) — la anomalía no es permanente, no se pudo reproducir
-a demanda. Se intentó también un escaneo de TODO el array buscando
-multiplicador/precio negativo en cualquier otro contrato, pero salió
-metodológicamente poco fiable: WebFetch resumió/truncó el array completo
-(confirmado pidiéndole que contara el total: devolvió 36 símbolos de los
-varios cientos que tiene `/contracts/active` en realidad) — así que un
-"no se encontró ningún negativo" de ese escaneo NO es evidencia real de
-nada y se descartó como conclusión.
+    kucoinfutures DIAGNÓSTICO OI negativo (4 contrato(s)): {
+      "ETHUSDM": {"openInterest_raw": "24974631", "multiplier_raw": -1.0, "markPrice_raw": 2608.06, ...},
+      "SOLUSDM": {"openInterest_raw": "5424548",  "multiplier_raw": -1.0, "markPrice_raw": 113.326, ...},
+      "XBTUSDM": {"openInterest_raw": "46529511", "multiplier_raw": -1.0, "markPrice_raw": 81148.8, ...},
+      "XRPUSDM": {"openInterest_raw": "7629466",  "multiplier_raw": -1.0, "markPrice_raw": 1.3995,  ...}
+    }
 
-`kucoinfutures` NO está en `CEX_FACTORY_BY_NAME` (ver
-`connectors/cex_ccxt.py`), así que este valor no pasa por ningún
-enriquecimiento aparte — sale tal cual de la fórmula de abajo
-(`openInterest × multiplier × markPrice`) a partir del mismo payload del
-fetch masivo, sin caché ni historial de por medio. Para que el producto dé
-negativo, al menos uno de esos tres factores tuvo que llegar YA negativo
-desde KuCoin en esa consulta concreta — no hay forma de que nuestro propio
-parseo (conversiones `float()` directas) invierta un signo.
+El símbolo real NO era "SOLUSDTM" (el contrato USDT-margined que se
+investigó primero y que siempre vino sano) — es **"SOLUSDM"** (sin la
+"T"), un contrato DISTINTO. Confirmado en vivo (WebFetch al endpoint de
+detalle, `GET /api/v1/contracts/SOLUSDM`, no al listado — el listado
+completo es demasiado grande y WebFetch lo resume/trunca sin avisar,
+lección aprendida de un intento anterior que dio un falso "no existe"):
 
-**Mientras no se capture el payload crudo en el momento exacto en que
-esto vuelve a pasar, no hay evidencia suficiente para señalar cuál de los
-tres factores es el culpable** — así que, siguiendo el mismo criterio de
-este proyecto (nunca inventar una causa sin datos reales), NO se intentó
-arreglar el campo concreto. En su lugar: (1) se añadió una guardia que
-descarta a `None` cualquier `open_interest_usd` calculado negativo, en vez
-de dejarlo pasar y depender de la coincidencia del piso de liquidez, y (2)
-se guarda el payload crudo completo (`openInterest`, `multiplier`,
-`markPrice`, tal cual llegaron) de cualquier contrato que dispare esto, en
-un `logger.warning` — para que la PRÓXIMA vez que se repita (y ya van
-dos), el log de despliegue real traiga por fin los tres valores crudos y
-se pueda cerrar esto con una causa confirmada en vez de una guardia
-genérica.
+    {"symbol": "SOLUSDM", "baseCurrency": "SOL", "quoteCurrency": "USD",
+     "settleCurrency": "SOL", "multiplier": -1.0, "isInverse": true,
+     "status": "Open", "openInterest": "5417319", "markPrice": 113.16}
+
+`isInverse: true` es el campo oficial de KuCoin que lo confirma: SOLUSDM
+es un contrato INVERSO (coin-margined, se liquida en SOL, cotiza en USD)
+— totalmente distinto de SOLUSDTM (lineal, USDT-margined). Ambos
+comparten `baseCurrency="SOL"`, así que este conector los normalizaba al
+MISMO `symbol="SOL"` y `compute_opportunities()` (ver `core/
+opportunities.py`) los agrupaba y comparaba como si fueran el mismo
+mercado — de ahí que "SOL" apareciera emparejado contra sí mismo en la
+práctica (una pierna era el lineal, la otra intentaba ser el inverso).
+
+La fórmula `openInterest × multiplier × markPrice` es correcta SOLO para
+contratos lineales (donde `multiplier` es la cantidad de activo base por
+contrato, ej. 0.1 SOL/contrato en SOLUSDTM). En un contrato inverso,
+`multiplier=-1.0` no es "cantidad de SOL por contrato" — es el valor
+centinela con el que KuCoin marca "esto es inverso", y la propia
+documentación de la API (contenido renderizado por JS, WebFetch solo
+pudo leer el esqueleto de navegación, no el cuerpo con las fórmulas) no
+se pudo consultar para confirmar la conversión correcta de vuelta a USD
+para este tipo de contrato — así que, siguiendo el mismo criterio de
+siempre en este proyecto (nunca inventar un número que no se puede
+verificar), NO se intentó adivinar esa fórmula.
+
+**Fix aplicado**: en vez de intentar convertir un tipo de contrato para
+el que no hay fórmula confirmada, se EXCLUYEN del todo los contratos
+inversos (`isInverse=True`, con `multiplier<0` como señal de refuerzo)
+de este conector — no entran ni al fetch masivo de funding rates ni,
+por tanto, al emparejamiento de oportunidades. Es la decisión correcta
+más allá del bug de OI: un contrato coin-margined (P&L y margen en SOL)
+no es la misma operación que uno USDT-margined, así que tratarlos como
+intercambiables bajo el mismo símbolo "SOL" ya era conceptualmente
+incorrecto para esta herramienta, con o sin el bug de OI. La guardia
+genérica de `open_interest_usd` negativo (ver más abajo) se mantiene
+como red de seguridad por si aparece otra causa distinta en el futuro,
+pero ya no debería dispararse para SOL/ETH/XBT/XRP.
 
 --- Nota sobre `turnoverOf24h` (CONFIRMADO en vivo, Paso 6 punto 2 — Volumen) ---
 
@@ -180,14 +193,13 @@ class KucoinConnector:
 
         out: list[FundingRate] = []
         skipped: dict[str, str] = {}
-        # Ver docstring más abajo, sección "Nota sobre openInterest negativo":
-        # bug real visto en producción (2026-09-19, símbolo SOL) — el propio
-        # KuCoin devolvió, al menos dos veces, un openInterest*multiplier*
-        # markPrice negativo (físicamente imposible). No tenemos capturado
-        # todavía CUÁL de los tres factores viene mal, así que en vez de
-        # adivinarlo se guarda el payload crudo completo de cualquier
-        # contrato que dé negativo, para verlo en el próximo log real.
+        # Ver docstring más abajo, sección "Nota sobre openInterest negativo
+        # — CAUSA RAÍZ CONFIRMADA": guardia de seguridad para cualquier OI
+        # negativo que se cuele por una causa DISTINTA a los contratos
+        # inversos (que ya se excluyen explícitamente más abajo) — no
+        # debería dispararse en circunstancias normales tras ese fix.
         oi_anomaly_samples: dict[str, dict] = {}
+        inverse_excluded: list[str] = []
 
         for row in rows:
             if not isinstance(row, dict):
@@ -196,6 +208,22 @@ class KucoinConnector:
 
             raw_symbol = row.get("symbol")
             if raw_symbol is None:
+                continue
+
+            # Ver docstring, "Nota sobre openInterest negativo — CAUSA RAÍZ
+            # CONFIRMADA": los contratos inversos/coin-margined (isInverse=
+            # True, ej. SOLUSDM) comparten baseCurrency con su equivalente
+            # lineal (ej. SOLUSDTM) y se normalizarían al mismo symbol="SOL"
+            # — pero son una operación distinta (margen/P&L en el activo
+            # base, no en USDT) y su fórmula de OI en USD no está
+            # confirmada (multiplier=-1.0 en estos es un centinela de
+            # "inverso", no "unidades de base por contrato" como en los
+            # lineales). Se excluyen del todo en vez de adivinar la
+            # conversión o tratarlos como el mismo mercado que el lineal.
+            if row.get("isInverse") or (
+                isinstance(row.get("multiplier"), (int, float)) and row.get("multiplier") < 0
+            ):
+                inverse_excluded.append(raw_symbol)
                 continue
 
             # Ver docstring: solo se acepta el estado confirmado en vivo.
@@ -294,12 +322,22 @@ class KucoinConnector:
                 skipped,
             )
 
+        if inverse_excluded:
+            logger.info(
+                "kucoinfutures: %d contrato(s) inverso(s)/coin-margined excluidos a propósito "
+                "(isInverse=True — ver docstring del módulo, causa raíz del bug de OI negativo "
+                "de SOL): %s",
+                len(inverse_excluded),
+                sorted(inverse_excluded),
+            )
+
         if oi_anomaly_samples:
             logger.warning(
-                "kucoinfutures DIAGNÓSTICO OI negativo (%d contrato(s), ver docstring del módulo — "
-                "openInterest*multiplier*markPrice dio negativo, físicamente imposible, se descartó "
-                "a None en vez de propagarse; payload crudo de los tres factores para averiguar "
-                "cuál viene mal): %s",
+                "kucoinfutures DIAGNÓSTICO OI negativo (%d contrato(s) — INESPERADO tras excluir "
+                "los inversos, ver docstring del módulo: openInterest*multiplier*markPrice dio "
+                "negativo en un contrato que NO se marcó isInverse, así que es una causa NUEVA, "
+                "no la ya confirmada de SOLUSDM/ETHUSDM/XBTUSDM/XRPUSDM; se descartó a None en "
+                "vez de propagarse; payload crudo de los tres factores para investigarla): %s",
                 len(oi_anomaly_samples),
                 json.dumps(oi_anomaly_samples, default=str)[:4000],
             )

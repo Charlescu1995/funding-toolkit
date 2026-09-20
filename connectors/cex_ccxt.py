@@ -419,10 +419,31 @@ class CexConnector:
         con guion bajo (ej. "EMBER_USDT", el campo `name` crudo de la API
         de gate — confirmado leyendo `parse_contract_market()` en el
         propio código fuente de ccxt, que asigna `market['id'] = name` sin
-        transformar). Se resuelve con `self._client.market(raw_symbol)['id']`,
-        que ccxt ya tiene cacheado tras el `fetch_funding_rates()` masivo
-        (no hace falta una llamada de red aparte solo para esto).
+        transformar). Se resuelve con `self._client.market(raw_symbol)['id']`.
+
+        CORREGIDO (2026-09-20, confirmado en vivo con el panel de
+        diagnóstico de la app en producción): la suposición original de
+        que `self._client.markets` ya estaría cacheado tras un
+        `fetch_funding_rates()` previo era FALSA para esta ruta de
+        llamada en concreto. `core/opportunities.py::fetch_oi_for_targets()`
+        no reutiliza el conector que trajo los funding rates -- construye
+        uno NUEVO desde cero solo para pedir OI (`factory()`, ver
+        `CEX_FACTORY_BY_NAME`), así que su `ccxt.gate()` interno nunca
+        había llamado a `load_markets()`. El resultado en producción fue
+        el error real capturado en el panel "OI Depth no disponible":
+        `ExchangeError: gate markets not loaded` -- el mismo error que
+        lanza ccxt internamente cuando `Exchange.market()` se llama con
+        `self.markets` vacío. Se corrige llamando a
+        `self._client.load_markets()` antes de `self._client.market()`.
+        No añade una llamada de red por símbolo: `load_markets(reload=False)`
+        (el valor por defecto) es idempotente -- comprobado leyendo
+        `Exchange.load_markets()` en el propio ccxt instalado, que
+        devuelve `self.markets` directamente si ya está poblado, sin
+        volver a pedir nada a la red. Solo la primera llamada dentro de
+        este batch de OI hace la petición real; el resto de símbolos de
+        gate en el mismo ciclo la reutilizan gratis.
         """
+        self._client.load_markets()
         contract_id = self._client.market(raw_symbol)["id"]
         resp = requests.get(
             GATE_CONTRACT_STATS_URL,

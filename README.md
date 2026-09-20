@@ -2335,6 +2335,68 @@ tirar el resto del top N, y el resto de exchanges de `CEX_FACTORY_BY_NAME`
 afectado). 113/113 tests pasan en el conjunto completo del proyecto tras este
 cambio, sin regresiones.
 
+#### Corrección sobre el fix anterior (2026-09-20): el bypass sí llegó a producción, pero fallaba un paso antes — `self._client.markets` nunca estaba cargado
+
+El fix de arriba se desplegó, y el propio panel de diagnóstico "OI Depth no
+disponible" de la app en producción lo confirmó indirectamente: el mensaje de
+error para `gate` cambió de `"NotSupported: gate fetchOpenInterest() is not
+supported yet"` (el hueco original de ccxt, ya evitado) a
+**`"ExchangeError: gate markets not loaded"`** — para **las 125 piernas de
+`gate`** del export CSV completo del Ranking, sin ninguna excepción. Ese
+cambio de mensaje ya era la prueba de que el bypass nuevo SÍ estaba
+ejecutándose (el mensaje viejo es estructuralmente imposible de producir con
+el código nuevo, que nunca llama a `fetch_open_interest()` de ccxt para
+gate) — pero fallaba en el paso siguiente.
+
+**Causa raíz**: el docstring original de `_fetch_gate_open_interest_usd()`
+asumía que `self._client.markets` ya estaría cacheado "tras el
+`fetch_funding_rates()` masivo, no hace falta una llamada de red aparte solo
+para esto" — cierto para el conector que trae los funding rates del universo
+completo, pero **falso para esta ruta de llamada en concreto**:
+`core/opportunities.py::fetch_oi_for_targets()` (línea ~183) no reutiliza ese
+conector — construye uno **nuevo** desde cero solo para pedir OI Depth del top
+N, vía `factory()` (`CEX_FACTORY_BY_NAME`). Ese `ccxt.gate()` nuevo nunca
+había llamado a `load_markets()`, así que `self._client.market(raw_symbol)`
+lanzaba el error real de ccxt cuando `self.markets` está vacío.
+
+**Reproducido en local, sin red, con un cliente `ccxt.gate()` de verdad** (no
+un mock que se salte el problema):
+
+```python
+>>> import ccxt
+>>> g = ccxt.gate({"enableRateLimit": True})
+>>> g.markets
+None
+>>> g.market("EMBER/USDT:USDT")
+ExchangeError: gate markets not loaded
+```
+
+Mensaje idéntico, carácter por carácter, al del panel de diagnóstico en
+producción — confirmación cruzada de que es exactamente esta causa y no otra.
+
+**Fix**: una línea, `self._client.load_markets()` antes de
+`self._client.market(raw_symbol)` en `_fetch_gate_open_interest_usd()`. No
+añade una llamada de red por símbolo dentro del mismo ciclo de OI: leyendo
+`Exchange.load_markets()` en el propio ccxt instalado, `load_markets(reload=
+False)` (el valor por defecto) devuelve `self.markets` directamente si ya
+está poblado, sin volver a pedir nada — solo la primera pierna de `gate` del
+batch paga la llamada real, el resto la reutiliza gratis.
+
+**Verificado** con `test_gate_load_markets_fix.py` (3 tests nuevos): (1)
+reproduce el error real de producción con un `ccxt.gate()` de verdad sin
+`load_markets()`, carácter por carácter igual al del panel de diagnóstico;
+(2) confirma que `_fetch_gate_open_interest_usd()` llama a `load_markets()`
+antes que a `market()`, no después; (3) end-to-end con un conector recién
+construido (`markets` vacío, igual que llega desde `factory()`) y
+`fetch_markets()`/`fetch_currencies()` de red sustituidos por un fixture fijo,
+confirmando que `fetch_open_interest_usd()` ya no revienta. 126/126 tests
+pasan en el conjunto completo del proyecto tras este cambio, sin regresiones.
+
+**Pendiente de reverificar en producción** tras el próximo deploy: hace falta
+un export CSV nuevo, generado después del redeploy con este fix, para
+confirmar que las piernas de `gate` del top 10 ya traen OI Depth real en vez
+de "—".
+
 ### Hallazgo #17 (auditoría 2026-09-19) — RESUELTO parcialmente a propósito: sin tabla de alias para símbolos con prefijo de multiplicador ("1000PEPE")
 
 La auditoría original lo marcó "SOSPECHOSO": ningún sitio de `core/` tiene una
@@ -2398,6 +2460,15 @@ confirma que PEPE (okx/mexc) y 1000PEPE (edgex/extended) ahora SÍ se
 emparejan en una única oportunidad vía `compute_opportunities()`. 123/123
 tests pasan en el conjunto completo del proyecto tras este cambio, sin
 regresiones.
+
+**Confirmado en producción (2026-09-20)**, con un export CSV nuevo del
+Ranking generado tras el deploy: en las 690 filas del export no queda ni un
+solo símbolo con prefijo de multiplicador conocido (`1000X`, `1M X`...) sin
+fusionar — comprobado programáticamente contra la lista cerrada de prefijos
+de `_canonical_symbol()`. El caso PEPE que motivó este hallazgo ya sale como
+una única fila fusionada (antes salían "PEPE" y "1000PEPE" como dos
+oportunidades separadas), con Price Spread en blanco — exactamente el
+comportamiento esperado de la opción segura elegida.
 
 ## Importante sobre dónde correr esto
 

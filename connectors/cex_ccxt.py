@@ -71,6 +71,25 @@ DEFAULT_INTERVAL_HOURS = {
     # esto es la misma simplificación que ya aplicamos al resto: partimos del
     # valor por defecto del exchange, sin refinar por símbolo.
     "aster": 8,
+    # bingx y phemex (ampliación de CEX, 2026-09-20): comprobado leyendo el
+    # código fuente de ccxt instalado (4.5.76) que, a diferencia de
+    # binance/bybit/okx/gate/aster, NINGUNO de los dos rellena la clave
+    # 'interval' en parse_funding_rate() -- sale None siempre, literal en el
+    # código (mismo caso que bitget, ver comentario de arriba). El intervalo
+    # de 8h no se ha inventado: viene confirmado por la documentación
+    # oficial de cada exchange, leída en vivo con WebFetch --
+    #   BingX (bingx.com/en/support/articles/14857605906575): "the standard
+    #   settlement interval is 8 hours (occurring 3 times daily) for most
+    #   trading pairs", aunque avisan que varía por símbolo para tokens
+    #   volátiles (4h/1h) -- ccxt no expone ese dato por símbolo, así que
+    #   aquí se aplica el mismo límite ya asumido para bitget: partimos del
+    #   valor por defecto sin refinar.
+    #   Phemex (phemex.com/help-center/Introduction-to-phemex-futures-funding-rate):
+    #   "the default funding settlement interval for Phemex perpetual
+    #   futures is 8 hours", con la misma salvedad de que Phemex se reserva
+    #   ajustarlo en volatilidad extrema.
+    "bingx": 8,
+    "phemex": 8,
 }
 
 
@@ -144,7 +163,7 @@ class CexConnector:
         # Dejamos que la excepción suba para que quien llame pueda decidir
         # qué hacer con el motivo real del fallo (core/data_service.py lo
         # captura y lo enseña en la interfaz).
-        raw = self._client.fetch_funding_rates()
+        raw = self._fetch_raw_funding_rates()
 
         # ccxt ya ha cargado (o cacheado) el listado oficial de mercados
         # operables como efecto secundario de fetch_funding_rates() — lo
@@ -295,6 +314,103 @@ class CexConnector:
                 interval_real_count + interval_fallback_count,
                 interval_fallback_count,
                 interval_default,
+            )
+
+        return out
+
+    def _fetch_raw_funding_rates(self) -> dict[str, dict]:
+        """
+        La inmensa mayoría de exchanges soportan fetch_funding_rates() bulk
+        de ccxt directamente (confirmado con `.has['fetchFundingRates']`).
+        Phemex es la única excepción entre los CEX que usan esta clase
+        genérica (ampliación de CEX, 2026-09-20:
+        `ccxt.phemex().has['fetchFundingRates']` es `False`) -- ver
+        _fetch_phemex_funding_rates_bulk() más abajo para el bypass.
+
+        BingX SÍ soporta fetch_funding_rates() bulk de verdad (`.has` en
+        `True`, confirmado en vivo) -- no necesita entrar aquí, cae directo
+        al caso general.
+        """
+        if self.ccxt_id == "phemex":
+            return self._fetch_phemex_funding_rates_bulk()
+        return self._client.fetch_funding_rates()
+
+    def _fetch_phemex_funding_rates_bulk(self) -> dict[str, dict]:
+        """
+        Bypass para Phemex (ampliación de CEX, 2026-09-20, confirmado leyendo
+        el código fuente de ccxt instalado 4.5.76 -- sin acceso a red al
+        exchange desde este sandbox, igual que el resto de investigación de
+        este proyecto, ver nota en cex_kucoin.py): `ccxt.phemex().has
+        ['fetchFundingRates']` es `False` -- no hay bulk implementado para
+        este exchange (a diferencia de `fetchFundingRate()` singular, que sí
+        existe pero supondría una llamada de red por símbolo, incompatible
+        con el patrón de este proyecto de "scan barato del universo
+        completo" -- ver docstring de fetch_open_interest_usd()).
+
+        Sin embargo, `Exchange.fetch_tickers()` de Phemex (bulk de verdad,
+        `.has['fetchTickers']` en `True`) usa internamente, para swap lineal
+        (USDT-margined), el método implícito de bajo nivel
+        `v2GetMdV2Ticker24hrAll` -- confirmado leyendo
+        `inspect.getsource(ccxt.phemex().fetch_tickers)`. No se puede
+        reutilizar fetch_tickers() tal cual porque parse_tickers()/
+        parse_ticker() no exponen el funding rate en el ticker unificado (se
+        pierde por el camino) -- pero cada fila cruda de la respuesta
+        ("result") tiene la MISMA forma que espera
+        `Exchange.parse_funding_rate()` (confirmado leyendo su código
+        fuente: los ejemplos del propio docstring de parse_funding_rate
+        muestran literalmente las claves fundingRateRr/markPriceRp/symbol
+        de esta respuesta), así que se llama al endpoint implícito
+        directamente y se reutiliza el parser real de ccxt en vez de
+        escribir uno propio desde cero.
+
+        Solo el endpoint LINEAR (v2, USDT-margined) -- se excluye a
+        propósito el endpoint INVERSE/USD-margined
+        (`v1GetMdTicker24hrAll`, contratos con sufijo Ep/Er de precisión
+        escalada) siguiendo el mismo criterio ya aplicado en este proyecto
+        para MEXC (Hallazgo #12 de la auditoría, ver cex_mexc.py): mezclar
+        contratos coin-margined descuadra la fórmula de Open Interest/
+        tamaño de posición del resto del pipeline, que asume USDT-margined
+        en todas partes. Como `self.quote` es siempre "USDT" en este
+        proyecto, el endpoint linear ya trae exactamente el universo que
+        interesa -- no hace falta ni llamar al endpoint inverse para
+        descartarlo después (y el filtro por `self.quote` de
+        fetch_funding_rates() lo descartaría de todas formas, así que
+        llamarlo sería una llamada de red desperdiciada).
+
+        Devuelve un dict {símbolo_unificado: fila_parseada} con la MISMA
+        forma que devuelve `self._client.fetch_funding_rates()` para
+        cualquier otro exchange -- así el resto de fetch_funding_rates() de
+        más arriba no necesita saber que Phemex es un caso especial.
+        """
+        self._client.load_markets()
+        response = self._client.v2GetMdV2Ticker24hrAll({})
+        rows = response.get("result") or []
+        out: dict[str, dict] = {}
+        skipped = 0
+        for row in rows:
+            try:
+                parsed = self._client.parse_funding_rate(row)
+            except Exception as exc:
+                skipped += 1
+                logger.warning(
+                    "phemex: fila descartada al parsear funding rate (%s: %s) -- symbol crudo=%s",
+                    type(exc).__name__,
+                    exc,
+                    row.get("symbol"),
+                )
+                continue
+            symbol = parsed.get("symbol")
+            if not symbol:
+                skipped += 1
+                continue
+            out[symbol] = parsed
+
+        if skipped:
+            logger.warning(
+                "phemex: %d fila(s) del endpoint bulk v2GetMdV2Ticker24hrAll descartada(s) "
+                "por no poder resolver un símbolo unificado (de %d totales)",
+                skipped,
+                len(rows),
             )
 
         return out
@@ -480,6 +596,38 @@ def gate() -> CexConnector:
     return CexConnector("gate")
 
 
+def bingx() -> CexConnector:
+    # Ampliación de CEX, 2026-09-20 (uno de los 3 CEX que tenía Loris y
+    # nosotros no -- ver comparativa-competidores.md del proyecto KUSI).
+    # Confirmado en vivo (sin red al exchange, vía ccxt instalado):
+    # ccxt.bingx().has['fetchFundingRates'] es True -- soporta el bulk
+    # directamente, no hace falta ningún bypass (a diferencia de phemex más
+    # abajo). El Open Interest del top N también cae en el caso genérico de
+    # fetch_open_interest_usd(): ccxt.bingx().has['fetchOpenInterest'] es
+    # True y, para swap lineal (USDT-margined, el único que nos interesa
+    # aquí -- ver quote="USDT"), parse_open_interest() de ccxt YA rellena
+    # openInterestValue directamente en USD (confirmado leyendo su código
+    # fuente) -- no necesita el fallback contratos×mark_price.
+    return CexConnector("bingx")
+
+
+def phemex() -> CexConnector:
+    # Ampliación de CEX, 2026-09-20 (los otros 2 de los 3 CEX de Loris que
+    # nos faltaban -- ver comparativa-competidores.md del proyecto KUSI).
+    # A diferencia de bingx, Phemex SÍ necesita un bypass para el bulk de
+    # funding rates -- ver CexConnector._fetch_phemex_funding_rates_bulk()
+    # para el porqué y la evidencia completa. El Open Interest del top N sí
+    # cae en el caso genérico de fetch_open_interest_usd() sin bypass
+    # propio: ccxt.phemex().has['fetchOpenInterest'] es True, y aunque su
+    # parse_open_interest() deja openInterestValue siempre en None
+    # (confirmado leyendo el código fuente), el fallback ya existente de
+    # fetch_open_interest_usd() (contratos × mark_price, el mismo que ya se
+    # usa para bitget) lo resuelve sin código nuevo: openInterestAmount
+    # viene en la moneda base (ej. BTC) y mark_price en la de cotización
+    # (USDT), el producto da el USD real.
+    return CexConnector("phemex")
+
+
 def aster() -> CexConnector:
     # Aster es arquitectónicamente un DEX (su propia "Aster Chain"), pero
     # ccxt ya trae fetch_funding_rates() implementado de verdad para él —
@@ -498,7 +646,7 @@ def aster() -> CexConnector:
 # arriba y reexportados aquí para que cli.py/core/data_service.py sigan sin
 # tener que saber qué exchanges usan ccxt y cuáles no — mismo patrón que ya
 # se sigue con el resto de conectores propios del proyecto (edgeX, GRVT...).
-ALL_CEX_FACTORIES = [binance, bybit, okx, bitget, kucoin, gate, mexc, htx]
+ALL_CEX_FACTORIES = [binance, bybit, okx, bitget, kucoin, gate, mexc, htx, bingx, phemex]
 
 # exchange_name (el mismo que NormalizedRate.exchange) -> factory. Se usa para
 # reconstruir un conector concreto cuando hace falta pedir OI Depth solo para
@@ -529,4 +677,12 @@ CEX_FACTORY_BY_NAME = {
     # real $0 pero nunca CONFIRMADO como tal (se quedaba en "—", no en "$0"),
     # así que has_dead_liquidity() no los descartaba. Ver README.
     "aster": aster,
+    # bingx/phemex (ampliación de CEX, 2026-09-20): igual que el resto de
+    # esta tabla, su fetch_funding_rates() masivo no trae Open Interest, así
+    # que necesitan la llamada aparte símbolo a símbolo de
+    # fetch_open_interest_usd() para el top N del ranking -- ver bingx()/
+    # phemex() más arriba para la evidencia de que caen en el caso genérico
+    # sin bypass propio.
+    "bingx": bingx,
+    "phemex": phemex,
 }

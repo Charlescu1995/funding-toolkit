@@ -8,7 +8,7 @@ ProFunding, Loris Tools y el selector delta-neutral de John5Cripto.
 Vamos construyéndola paso a paso. Progreso:
 
 - [x] Paso 1 — Arquitectura del proyecto y modelo de datos común
-- [x] Paso 2 — Conectores de datos: 8 CEX (Binance, Bybit, OKX, Bitget, Gate vía ccxt; KuCoin/MEXC/HTX con conector propio — ccxt no soporta `fetchFundingRates()` para estos tres, ver sexta tanda más abajo) + 15 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational, RiseX, Backpack, Nado, Hibachi, Vertex y ApeX vía API directa/ccxt) — los 13 primeros DEX confirmados devolviendo datos reales en producción (Variational: 547 pares, RiseX: 30 pares tras dos rondas de fix, Backpack/Nado/Hibachi sin ningún error en su primer despliegue real, ver más abajo); Vertex y ApeX son la quinta tanda — ApeX confirmado en vivo, Vertex construido solo a partir de documentación (no se pudo alcanzar su API desde este entorno) y CONFIRMADO en producción bloqueado por red (mismo patrón que Binance/Bybit — ver sección dedicada). Se investigó también Drift Protocol y se descartó: su API quedó inutilizable tras el hackeo de ~$285-295M de abril 2026 y sus dominios oficiales redirigen a un fork no oficial ("Velocity Exchange") que no es Drift — ver sección dedicada
+- [x] Paso 2 — Conectores de datos: 10 CEX (Binance, Bybit, OKX, Bitget, Gate, BingX, Phemex vía ccxt; KuCoin/MEXC/HTX con conector propio — ccxt no soporta `fetchFundingRates()` para estos tres, ver sexta tanda más abajo; BingX/Phemex son la novena tanda, ampliación tras la comparativa con la competencia — Crypto.com se queda fuera a propósito, ver esa sección) + 15 DEX (Hyperliquid, Lighter, Paradex, Extended, Pacifica, Aster, edgeX, GRVT, Variational, RiseX, Backpack, Nado, Hibachi, Vertex y ApeX vía API directa/ccxt) — los 13 primeros DEX confirmados devolviendo datos reales en producción (Variational: 547 pares, RiseX: 30 pares tras dos rondas de fix, Backpack/Nado/Hibachi sin ningún error en su primer despliegue real, ver más abajo); Vertex y ApeX son la quinta tanda — ApeX confirmado en vivo, Vertex construido solo a partir de documentación (no se pudo alcanzar su API desde este entorno) y CONFIRMADO en producción bloqueado por red (mismo patrón que Binance/Bybit — ver sección dedicada). Se investigó también Drift Protocol y se descartó: su API quedó inutilizable tras el hackeo de ~$285-295M de abril 2026 y sus dominios oficiales redirigen a un fork no oficial ("Velocity Exchange") que no es Drift — ver sección dedicada
 - [x] Paso 3 — Normalización de intervalos y cálculo de APR anualizado
 - [x] Paso 4 — Snapshots históricos (SQLite) → APR histórico real 1h/24h/7d/30d
 - [x] Paso 5 — Consistency Score, OI Depth, Price Spread y Volume 24h (con fallback contratos×mark_price para exchanges que no dan el USD directo; ver séptima tanda para Price Spread y octava tanda para Volume 24h)
@@ -1208,6 +1208,106 @@ qué, en vez de borrarlo sin rastro, mismo criterio que la historia de
 diagnóstico en `pages/1_Funding_Rates.py`. Verificado con un test que usa
 los valores EXACTOS de INTU y NOW_24_5 del log real: INTU se conserva
 (Vol 24h=$0 pero ACTIVE), NOW_24_5 se descarta (DELISTED).
+
+### CEX nuevos, novena tanda (BingX, Phemex — ampliación tras la comparativa con la competencia; Crypto.com se queda fuera)
+
+Origen: al analizar la competencia (ProFunding, Loris.tools, John5Cripto —
+ver `comparativa-competidores.md` en el proyecto KUSI de Claude), se
+confirmó que Loris.tools cubre 3 CEX que nosotros no: BingX, Phemex y
+Crypto.com. Se investigó viabilidad real de los tres (leyendo el código
+fuente de ccxt 4.5.76 instalado con `inspect.getsource()`, sin red al
+exchange desde este sandbox — mismo método ya usado para KuCoin/MEXC/HTX,
+ver más arriba — más la documentación oficial de cada exchange vía
+WebSearch/WebFetch para el intervalo real de funding).
+
+**BingX**: trivial. `ccxt.bingx().has['fetchFundingRates']` es `True` — cae
+directo en el caso genérico de `CexConnector`, igual que binance/bybit/okx/
+bitget/gate, sin ningún bypass. El Open Interest del top N tampoco necesita
+fallback: `parse_open_interest()` de BingX ya rellena `openInterestValue`
+directo en USD para swap lineal (confirmado leyendo su código fuente).
+
+**Phemex**: `ccxt.phemex().has['fetchFundingRates']` es `False` — no hay
+bulk implementado para este exchange (a diferencia de
+`fetchFundingRate()` singular, que sí existe pero supondría una llamada de
+red por símbolo para todo el universo, incompatible con el patrón de este
+proyecto de "scan barato" — ver docstring de `fetch_open_interest_usd()`
+en `connectors/cex_ccxt.py`). Se encontró un bypass real: `fetch_tickers()`
+de Phemex (bulk de verdad) usa internamente, para swap lineal
+(USDT-margined), el método implícito de bajo nivel `v2GetMdV2Ticker24hrAll`
+(confirmado leyendo `inspect.getsource(ccxt.phemex().fetch_tickers)`). Cada
+fila cruda de esa respuesta tiene la MISMA forma que espera
+`Exchange.parse_funding_rate()` de ccxt (confirmado en el propio docstring
+del parser: los ejemplos "linear swap v2" muestran literalmente las claves
+`fundingRateRr`/`markPriceRp`/`symbol` de esa respuesta) — así que
+`CexConnector._fetch_phemex_funding_rates_bulk()` llama al endpoint
+implícito directamente y reutiliza `self._client.parse_funding_rate()`, el
+parser REAL de ccxt, en vez de reimplementarlo. Solo se llama el endpoint
+LINEAR — se excluye a propósito el endpoint INVERSE/USD-margined
+(`v1GetMdTicker24hrAll`, contratos con sufijo Ep/Er de precisión escalada),
+mismo criterio ya aplicado para MEXC (Hallazgo #12 de la auditoría):
+mezclar coin-margined descuadra el resto del pipeline, que asume
+USDT-margined en todas partes. Para el Open Interest, Phemex tampoco
+necesita bypass propio: su `parse_open_interest()` deja `openInterestValue`
+siempre en `None` (solo trae `openInterestAmount`, en la moneda base), así
+que cae en el mismo fallback contratos×mark_price que ya existía para
+bitget — código ya escrito, cero líneas nuevas para esto.
+
+Ninguno de los dos exchanges rellena la clave `interval` de ccxt (siempre
+`None` en su `parse_funding_rate()`, confirmado leyendo el código fuente —
+mismo caso que bitget), así que ambos usan el valor fijo de
+`DEFAULT_INTERVAL_HOURS`. El valor (8h para los dos) no se ha inventado:
+viene confirmado leyendo en vivo la documentación oficial de cada uno —
+BingX ("the standard settlement interval is 8 hours... for most trading
+pairs", con la salvedad de que varía por símbolo en tokens volátiles — ccxt
+no expone ese detalle por símbolo, mismo límite ya asumido para bitget) y
+Phemex ("the default funding settlement interval for Phemex perpetual
+futures is 8 hours").
+
+**Crypto.com — NO implementado, bloqueo real confirmado, no solo "no lo
+encontré en la doc"**: a diferencia de Phemex, aquí no hay ningún bypass
+bulk posible. `ccxt.cryptocom().has['fetchFundingRates']` es `False`, y
+`fetch_funding_rate()` (singular) exige `instrument_name` obligatorio —
+una llamada de red por símbolo vía `public/get-valuations` (confirmado
+leyendo su código fuente). Se comprobó explícitamente si `fetch_tickers()`
+(bulk, `public/get-tickers`) trae algún campo de funding oculto en el
+ticker — su respuesta solo trae `i, h, l, a, v, vv, c, b, k, oi, t`
+(máximo, mínimo, apertura, volumen, cierre, bid, ask, open interest,
+timestamp — ningún campo de funding). Y para no quedarse solo con "no lo
+vi en la doc" (la doc pública de Crypto.com Exchange es una SPA en
+JavaScript que WebFetch no puede parsear a contenido útil — se comprobó,
+devolvió solo metadata de la página), se recorrió el mapa COMPLETO de
+endpoints públicos que ccxt tiene definido para este exchange
+(`ex.describe()['api']`, la lista entera, no una búsqueda por palabra
+clave): el único endpoint relacionado con funding en TODA la API pública
+de Crypto.com Exchange, según la implementación real de ccxt, es
+`public/get-valuations` — el mismo, singular, de arriba. No existe ningún
+endpoint bulk de "premium index" ni equivalente, ni en tickers ni en
+ningún otro sitio.
+
+Construir un conector para Crypto.com implicaría necesariamente un bucle
+de N llamadas de red (una por símbolo) solo para el scan de funding rates
+del universo completo — justo el patrón que este proyecto evita a
+propósito en todos los demás conectores (ver docstring de
+`fetch_open_interest_usd()`: las llamadas símbolo a símbolo se reservan
+para el Open Interest del top N ya filtrado, nunca para el scan inicial).
+Por eso, siguiendo el mismo criterio ya aplicado con Vertex (dejado como
+bloqueado en vez de forzar una implementación sobre un acceso no
+confirmado) y con el bypass REST de Aster (abandonado al fallar con 400 en
+vez de insistir), **Crypto.com se deja fuera de esta ampliación** en vez
+de implementarlo con un bucle lento que rompería la arquitectura del
+resto del proyecto. Queda pendiente una decisión explícita: implementarlo
+igualmente aceptando el coste de rendimiento/rate-limit, o dejarlo fuera
+del alcance del proyecto.
+
+Confirmado con 12 tests nuevos (`test_bingx_phemex_cex_expansion.py`):
+registro en `ALL_CEX_FACTORIES`/`CEX_FACTORY_BY_NAME`, que BingX usa el
+camino genérico sin desviarse al bypass de Phemex, que el bypass de Phemex
+solo llama al endpoint linear (nunca al inverse), que reutiliza de verdad
+el parser real de ccxt (no mockeado, con una instancia real de
+`ccxt.phemex()`), que una fila no parseable no tira el resto del batch, el
+pipeline end-to-end completo de `fetch_funding_rates()` para Phemex, y el
+fallback de Open Interest para ambos exchanges. Suite completa del
+proyecto: 138/138 (los 126 anteriores + estos 12).
 
 ## Investigando (2026-09-18): oportunidades con long y short en el MISMO exchange
 

@@ -2392,10 +2392,17 @@ construido (`markets` vacío, igual que llega desde `factory()`) y
 confirmando que `fetch_open_interest_usd()` ya no revienta. 126/126 tests
 pasan en el conjunto completo del proyecto tras este cambio, sin regresiones.
 
-**Pendiente de reverificar en producción** tras el próximo deploy: hace falta
-un export CSV nuevo, generado después del redeploy con este fix, para
-confirmar que las piernas de `gate` del top 10 ya traen OI Depth real en vez
-de "—".
+**Confirmado en producción (2026-09-20)**, con un export CSV nuevo generado
+después del redeploy con este fix: las dos piernas de `gate` dentro del top
+10 (EMBER, rank #1: OI $188.520,33; LAPTOP, rank #7: OI $736.790,88) ya traen
+Open Interest real en vez de "—". El panel de diagnóstico "OI Depth no
+disponible" de la app ya no muestra ningún error de `gate` — solo quedan los
+de `aster` (hueco distinto, ya documentado y aceptado más arriba en esta
+misma sección), confirmando que el problema de `gate` quedó resuelto del
+todo. Las otras 116 piernas de `gate` del export sin OI son las que caen
+fuera del top N enriquecido (comportamiento esperado, no relacionado con este
+bug — ver el docstring de `fetch_open_interest_usd()`, que deliberadamente no
+pide OI para el universo completo).
 
 ### Hallazgo #17 (auditoría 2026-09-19) — RESUELTO parcialmente a propósito: sin tabla de alias para símbolos con prefijo de multiplicador ("1000PEPE")
 

@@ -303,14 +303,15 @@ with tab_ranking:
 
         # Ver core/opportunities.py::has_low_liquidity — piso de liquidez
         # mínima pedido por el usuario tras estudiar el CSV completo del
-        # Ranking (2026-09-19): un OI o Volumen 24h CONFIRMADO por debajo de
-        # $1.000 en CUALQUIERA de las cuatro piernas (OI long/short, Vol
+        # Ranking (2026-09-19, subido de $1.000 a $5.000 el 2026-09-21 tras
+        # el caso real MOG): un OI o Volumen 24h CONFIRMADO por debajo del
+        # piso en CUALQUIERA de las cuatro piernas (OI long/short, Vol
         # long/short — no solo el "cuello de botella" ya calculado, que
         # exige las dos piernas conocidas, ver el bug real documentado en el
         # docstring de has_low_liquidity) es "una trampa" (Spread APR
-        # llamativo, pero imposible de operar en ningún tamaño real) — no
-        # solo el caso extremo de $0 exacto que ya saca has_dead_liquidity
-        # de arriba.
+        # llamativo, pero imposible de operar en ningún tamaño real, o un
+        # mercado a punto de darse de baja) — no solo el caso extremo de $0
+        # exacto que ya saca has_dead_liquidity de arriba.
         low_liquidity = [o for o in opportunities if has_low_liquidity(o)]
         opportunities = [o for o in opportunities if not has_low_liquidity(o)]
 

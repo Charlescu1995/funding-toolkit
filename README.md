@@ -1470,11 +1470,27 @@ allá de lo confirmado: MOG se dio de baja en uno o ambos exchanges en la ventan
 el dato (caché de 60s) y que Carlos hizo clic — un riesgo real de cualquier scanner de funding rate
 contra mercados de baja capitalización, no algo que un cambio en el formato de la URL pueda arreglar.
 
-**Mitigación añadida**: verificar en vivo cada enlace antes de pintar la tabla no es viable (cientos de
-filas, rompería el patrón de "scan barato" de todo el proyecto). En su lugar se añadió un caption
-nuevo (⏱️) bajo la tabla de Ranking explicando este riesgo concreto y apuntando a la columna "Cuello de
-botella OI" como la señal ya disponible para detectarlo — cuanto más bajo ese número, más probable que
-el enlace falle por esto, no por un enlace mal construido.
+**Mitigación añadida (primera pasada)**: verificar en vivo cada enlace antes de pintar la tabla no es
+viable (cientos de filas, rompería el patrón de "scan barato" de todo el proyecto). Se añadió un
+caption nuevo (⏱️) bajo la tabla de Ranking explicando este riesgo concreto y apuntando a la columna
+"Cuello de botella OI" como la señal ya disponible para detectarlo.
+
+**Carlos, con razón, no se conformó con un aviso**: "si no tiene enlace [que funcione] para qué voy a
+entrar ahí, si no existe, no tiene sentido que esté" — un aviso no soluciona nada si la oportunidad
+sigue apareciendo en el ranking principal como si fuera operable. Se subió directamente el **piso de
+liquidez mínima** que ya existía (`LOW_LIQUIDITY_FLOOR_USD` en `core/opportunities.py`, pensado
+originalmente para el caso MNT del 2026-09-19) de **$1.000 a $5.000** — el caso real de MOG (Cuello de
+botella OI = $3.484 en la pierna de ApeX) pasaba el piso viejo sin problema, así que el piso viejo ya
+no bastaba con la evidencia que tenemos ahora. Con el piso nuevo, MOG (y cualquier oportunidad futura
+con una pierna igual de fina) se descarta del ranking principal directamente — pasa a la lista de
+"descartadas por baja liquidez" del panel de diagnóstico, igual que ya pasaba con MNT, en vez de
+aparecer como si fuera operable. Esto no es una garantía absoluta (un mercado más líquido también
+podría, en teoría, darse de baja entre el fetch y el clic — solo hace ese caso mucho menos probable,
+con los dos casos reales que ya hemos visto como evidencia de dónde poner el corte), pero es la
+mitigación real y honesta disponible sin romper el patrón de "scan barato": no prometer una
+oportunidad que muy probablemente no se pueda operar. Confirmado con el test existente actualizado
+(`test_has_low_liquidity_uses_real_csv_evidence`, con un caso nuevo específico para MOG) y toda la
+suite del proyecto: 145/145.
 
 ## Investigando (2026-09-18): oportunidades con long y short en el MISMO exchange
 

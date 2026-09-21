@@ -327,7 +327,24 @@ def has_implausible_price_pair(opp: OpportunityRow) -> bool:
 # limpio que había sobre la mesa (Volumen EXACTAMENTE $0: PYTH, PEOPLE,
 # KLUNC, KFLOKI, US500 en ese mismo CSV — con floor=$1.000 caen aquí sin
 # necesidad de una función aparte tipo has_dead_volume()).
-LOW_LIQUIDITY_FLOOR_USD = 1000.0
+#
+# Subido a $5.000 (2026-09-21, ver README "caso MOG"): el usuario dio un
+# segundo caso real, MOG en bitget(long)/apex(short) — Spread APR llamativo
+# (+4380% en la pierna de apex), pero con Cuello de botella OI = $3.484 en
+# esa misma pierna. $3.484 pasaba el piso anterior de $1.000 sin problema,
+# pero en la práctica el mercado se dio de baja en apex poco después
+# (confirmado en vivo contra la API de apex y bitget, ver README): el
+# usuario, con razón, señaló que una oportunidad que no se puede abrir "no
+# tiene sentido que esté" en el ranking, aunque el motivo exacto (mercado
+# recién delistado) no sea algo que el piso de liquidez pueda detectar
+# directamente. Subir el piso a $5.000 (justo por encima de ese caso real,
+# más allá de p10 tanto en OI como en Vol) es la mitigación disponible sin
+# romper el patrón de "scan barato": no garantiza que un mercado no se dé
+# de baja entre el fetch y el clic, pero si algo tiene tan poca profundidad
+# que ronda los pocos miles de dólares, ya es -- con los dos casos reales
+# que hemos visto -- más probable que sea una trampa (o esté a punto de
+# dejar de existir) que una oportunidad operable de verdad.
+LOW_LIQUIDITY_FLOOR_USD = 5000.0
 
 
 def has_low_liquidity(opp: OpportunityRow, floor_usd: float = LOW_LIQUIDITY_FLOOR_USD) -> bool:

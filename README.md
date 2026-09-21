@@ -1569,6 +1569,34 @@ esperado por el test. No se ha investigado ni arreglado en esta tanda — no es 
 y no afecta a la cuenta de 150/150 de arriba (que usa solo los archivos con `def test_*`, la convención
 actual) — queda anotado aquí para no perderlo de vista.
 
+### Columnas Long/Short en la Matriz, misma tanda (2026-09-21, noche) — el mejor exchange de cada dirección, sin escanear la fila
+
+Carlos pidió, justo después de la matriz clicable de arriba: "quiero que las dos primeras columnas sean
+Long y Short. Cada una con las mejores opciones de Long y short para cada token y que tenga el enlace
+directo" — para no tener que recorrer visualmente toda la fila buscando qué celda llevaba el `· LONG`/
+`· SHORT` que ya se marcaba desde el Paso 6.
+
+**Implementado reutilizando lo que ya existía, no una lógica nueva**: la matriz ya calculaba, por fila,
+`best_long`/`best_short` (el exchange con el APR mínimo/máximo de ese símbolo) para poner el sufijo
+`· LONG`/`· SHORT` en la celda correspondiente. Las dos columnas nuevas ("Long" y "Short", justo después
+de "Símbolo") simplemente enseñan ese mismo cálculo por adelantado: el nombre del exchange + su APR, como
+un enlace construido con el mismo `_link_td()` que ya usa el resto de la matriz — así que heredan
+automáticamente los marcadores `?`/🌍 si el mejor exchange para esa dirección resulta ser uno sin
+confirmar o con bloqueo regional (confirmado con test dedicado, ver abajo). Si un símbolo solo tiene datos
+en un exchange, no hay "mejor" long y "mejor" short en sitios distintos entre los que elegir — esas dos
+celdas quedan en guion, igual que una celda sin dato, en vez de forzar una elección sin sentido.
+
+**Refactor de paso**: se extrajo un helper `_link_td()` (celda + enlace + marcador, un solo lugar) para no
+triplicar la lógica de `?`/🌍 entre la celda de exchange, la de Long y la de Short — antes esa lógica solo
+existía una vez, ahora se reutiliza tres veces por fila sin copiar y pegar.
+
+Confirmado con 4 tests nuevos en `test_matrix_links.py`: cabecera trae Símbolo → Long → Short → exchanges
+en ese orden; Long/Short eligen el exchange de APR mínimo/máximo real (con un tercer exchange intermedio a
+propósito, para confirmar que NO sale elegido); Long/Short heredan el marcador `?`/🌍 cuando el mejor
+exchange de esa dirección es uno sin confirmar o region-restricted (no solo su propia columna de
+exchange); y un símbolo con un solo exchange deja Long/Short en guion. Suite completa del proyecto:
+**154/154** (los 150 anteriores + estos 4).
+
 ## Investigando (2026-09-18): oportunidades con long y short en el MISMO exchange
 
 El usuario exportó el Ranking completo a CSV (912 filas) para buscar dónde

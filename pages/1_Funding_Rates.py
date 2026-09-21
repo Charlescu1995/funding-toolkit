@@ -398,7 +398,8 @@ with tab_ranking:
 with tab_matrix:
     st.caption(
         "Cada símbolo contra cada exchange, sin pre-filtrar — el dato crudo, estilo Loris. "
-        "Haz clic en cualquier porcentaje para abrir ese par directamente en ese exchange."
+        "Haz clic en cualquier porcentaje para abrir ese par directamente en ese exchange. Las "
+        "columnas 'Long' y 'Short' resumen, por símbolo, el mejor exchange para cada dirección."
     )
     matrix = build_matrix(rates)
     columns = exchange_columns(rates)

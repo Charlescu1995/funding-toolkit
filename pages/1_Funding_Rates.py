@@ -14,7 +14,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from connectors.exchange_links import UNCONFIRMED_EXCHANGES, build_link
+from connectors.exchange_links import REGION_RESTRICTED_EXCHANGES, UNCONFIRMED_EXCHANGES, build_link
 from core.aggregate import build_matrix, exchange_columns
 from core.data_service import fetch_normalized_rates, filter_rates
 from core.history import WINDOWS_HOURS, historical_apr_all_windows, init_db
@@ -412,6 +412,19 @@ with tab_ranking:
                 + " no se pudo confirmar en vivo un enlace directo al símbolo exacto (interfaz muy "
                 "dependiente de JavaScript, acceso restringido, o sin documentación) — 'Abrir' lleva "
                 "a la página general de trading de ese exchange, no al par concreto."
+            )
+        if REGION_RESTRICTED_EXCHANGES:
+            # Ver connectors/exchange_links.py (auditoría 2026-09-21): aquí el
+            # enlace SÍ apunta al símbolo correcto, pero el propio exchange
+            # bloquea el producto entero para ciertas regiones (confirmado en
+            # vivo desde España) -- distinto de "no confirmado" de arriba.
+            st.caption(
+                "🌍 "
+                + ", ".join(sorted(REGION_RESTRICTED_EXCHANGES))
+                + " pueden mostrar un aviso de bloqueo regional al abrir 'Abrir Long'/'Abrir Short' "
+                "según desde dónde te conectes (confirmado en vivo desde España, 2026-09-21) — el "
+                "enlace en sí apunta al par correcto, es el propio exchange el que restringe el "
+                "producto por país."
             )
         st.caption(
             "Price Spread: diferencia de precio (mark price) entre las dos piernas — un coste que "

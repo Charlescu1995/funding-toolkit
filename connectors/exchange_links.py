@@ -26,6 +26,44 @@ el futuro se quiere sustituir cualquiera de estas URLs por una versión con
 código de referido/afiliado, es cambiar el `template`/`fallback_url` de esa
 entrada aquí — nada más en el proyecto depende del formato exacto de la
 URL, solo de `build_link()`.
+
+--- Auditoría en vivo del punto 5, pedida por Carlos (2026-09-21) ---
+
+Carlos reportó en producción que varios enlaces "no salían" (nada), otros
+redirigían al mercado por defecto del exchange (BTC), y otros daban un
+"bloqueo regional" al abrirlos desde su navegador. Se auditaron en vivo, con
+el navegador real del usuario (no WebFetch, que sale desde otra IP/región),
+los ~20 dominios de exchange que aparecían en un export real de la tabla
+Ranking (16-25 símbolos por exchange, incluyendo casos raros a propósito:
+tokens de una letra, acciones tokenizadas, forex). Resultado:
+
+  - Todas las plantillas `confirmed=True` cargaron el mercado correcto con
+    el símbolo pedido (Hyperliquid, Lighter -- incl. AAPL --, Pacifica --
+    incl. EURUSD --, Backpack, BingX, GRVT, Variational -- incl. un token
+    literalmente llamado "4" --, Phemex, edgeX -- incl. AAOI --, Bitget --
+    incl. "2Z" --, Gate -- incl. "4STOCK" --, KuCoin, MEXC -- incl. "AAPU"
+    --, Binance, Bybit, ApeX -- incl. AR, ver nota debajo). Ninguna mostró
+    "va a BTC porque no encuentra el par": las plantillas en sí están bien.
+  - ApeX (AR-USDT) pareció mostrar todo a cero en la primera lectura -- fue
+    una falsa alarma por leer la página antes de que terminara de cargar
+    (SPA pesada); una segunda lectura, un poco después, mostró el precio y
+    el símbolo correctos. Aviso para quien reproduzca esta auditoría: dar
+    tiempo a la SPA antes de concluir que un mercado está roto.
+  - Los 6 exchanges sin plantilla (`confirmed=False`) cargaron su página
+    general sin errores -- funcionan tal como están diseñados (con el aviso
+    de la interfaz), aunque a un usuario le puede seguir pareciendo que "no
+    sale nada" porque no hay símbolo preseleccionado.
+  - DOS exchanges con plantilla confirmada (`confirmed=True`, el formato de
+    URL es correcto) están BLOQUEADOS por el propio exchange para la región
+    del usuario (España/UE), confirmado en vivo con dos símbolos distintos
+    cada uno -- ver `region_note` en sus entradas: OKX (mensaje explícito
+    "no disponible en tu país o región") y Aster (403 de CloudFront en TODO
+    el dominio, incluida la home, contrastado contra WebFetch que sí carga
+    la misma URL desde otra región). Esto es justo el "bloqueo regional"
+    que describió Carlos -- no es un bug de la plantilla, es el propio
+    exchange rechazando el producto para esa región.
+  - Vertex tenía un fallback_url muerto (app.vertexprotocol.com/trade daba
+    404 de Vercel) -- corregido, ver su nota.
 """
 
 from __future__ import annotations
@@ -47,6 +85,13 @@ class ExchangeLink:
     # siempre devuelve fallback_url para esta entrada.
     confirmed: bool
     note: str = ""
+    # Distinto de `confirmed=False`: aquí el FORMATO de la URL es correcto
+    # (confirmed=True), pero el propio exchange bloquea el producto entero
+    # para ciertas regiones -- se comprobó EN VIVO desde España (navegador
+    # real del usuario, no WebFetch) y el bloqueo salta para cualquier
+    # símbolo, no es un problema del enlace. None si no hay bloqueo
+    # regional conocido.
+    region_note: str | None = None
 
 
 EXCHANGE_LINKS: dict[str, ExchangeLink] = {
@@ -70,6 +115,12 @@ EXCHANGE_LINKS: dict[str, ExchangeLink] = {
         confirmed=True,
         note="Confirmado en vivo contra okx.com/trade-swap/btc-usdt-swap -- minúsculas, con sufijo "
         "-swap (ojo, distinto del resto), 2026-09-21.",
+        region_note="Bloqueado en vivo (navegador real, España, 2026-09-21) para CUALQUIER símbolo "
+        "(probado con btc-usdt-swap y 2z-usdt-swap) -- OKX muestra: «Este producto no está "
+        "disponible actualmente en tu país o región debido a las leyes y normativas locales.» "
+        "Es un bloqueo de OKX a nivel de producto (derivados/perpetuos para retail en la UE, "
+        "coherente con MiCA/ESMA), no un fallo de la URL -- el enlace está bien formado, pero no "
+        "abrirá el mercado desde una IP española/UE.",
     ),
     "bitget": ExchangeLink(
         "https://www.bitget.com/futures/usdt/{base}USDT",
@@ -161,6 +212,12 @@ EXCHANGE_LINKS: dict[str, ExchangeLink] = {
         confirmed=True,
         note="Confirmado en vivo contra asterdex.com/en/futures/v1/BTCUSDT (dominio real: "
         "asterdex.com, no aster.exchange), 2026-09-21.",
+        region_note="Bloqueado en vivo (navegador real, España, 2026-09-21): TODO asterdex.com "
+        "devuelve un 403 de CloudFront (\"ERROR: The request could not be satisfied\"), incluso la "
+        "home sin símbolo -- probado con /en/futures/v1/BTCUSDT y con la home. Contraste: la misma "
+        "URL SÍ carga bien vía WebFetch (infraestructura de Anthropic, otra IP/región), lo que "
+        "confirma que es un bloqueo geográfico del propio Aster, no una caída del sitio ni un fallo "
+        "de la plantilla.",
     ),
     "edgex": ExchangeLink(
         "https://pro.edgex.exchange/en-US/trade/{base}USD",
@@ -218,11 +275,20 @@ EXCHANGE_LINKS: dict[str, ExchangeLink] = {
     ),
     "vertex": ExchangeLink(
         None,
-        "https://app.vertexprotocol.com/trade",
+        "https://www.google.com/search?q=Vertex+Protocol+perpetuals+exchange+official+site",
         confirmed=False,
-        note="No se encontró ningún patrón de URL por símbolo documentado, 2026-09-21 -- coherente "
-        "con que Vertex ya es el conector menos confirmable de todo el proyecto (ver README, "
-        "bloqueado por red desde el hosting).",
+        note="Actualización 2026-09-21 (auditoría de enlaces rotos pedida por Carlos): el "
+        "fallback_url anterior (app.vertexprotocol.com/trade) YA NO EXISTE -- comprobado en vivo "
+        "con navegador real, devuelve 404 DEPLOYMENT_NOT_FOUND de Vercel (\"This page doesn't "
+        "exist... It may have been moved, removed, or never existed\"); vertexprotocol.io (dominio "
+        "oficial listado en CoinMarketCap) tampoco cargó. Se probaron ambos dominios conocidos y "
+        "los dos están caídos. Una búsqueda web del nombre del proyecto devuelve, en su mayoría, "
+        "dominios clon con pinta de phishing (*.pages.dev, *.typedream.app con nombres como "
+        "\"vertex-exxchanges-us\") -- por eso NO se sustituye por ninguno de esos resultados ni se "
+        "adivina un dominio nuevo. Se deja un buscador genérico sin símbolo como único fallback "
+        "seguro hasta poder confirmar a mano cuál es (si lo hay) el sitio oficial vigente de "
+        "Vertex Protocol. Coherente con que Vertex ya era el conector menos confirmable de todo el "
+        "proyecto (ver README, bloqueado por red desde el hosting).",
     ),
     "apex": ExchangeLink(
         "https://omni.apex.exchange/trade/{base}USDT",
@@ -238,6 +304,15 @@ EXCHANGE_LINKS: dict[str, ExchangeLink] = {
 # quede desactualizada si se confirma uno de estos más adelante.
 UNCONFIRMED_EXCHANGES: frozenset[str] = frozenset(
     name for name, entry in EXCHANGE_LINKS.items() if not entry.confirmed
+)
+
+# Exchanges cuya plantilla de URL es correcta (confirmed=True) pero que se
+# comprobó EN VIVO, desde un navegador real en España, que bloquean el
+# producto entero para esa región -- distinto de "sin confirmar": aquí el
+# enlace está bien construido, el propio exchange lo rechaza. Igual que
+# arriba, se calcula del diccionario para no quedar desactualizado.
+REGION_RESTRICTED_EXCHANGES: frozenset[str] = frozenset(
+    name for name, entry in EXCHANGE_LINKS.items() if entry.region_note
 )
 
 

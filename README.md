@@ -1386,6 +1386,55 @@ y que un símbolo con prefijo de multiplicador (Hallazgo #17, "1000PEPE") pasa i
 que la página completa carga sin excepciones y que las dos columnas nuevas salen con URLs reales en
 el dataframe. Suite completa del proyecto: 143/143 (los 138 anteriores + estos 5).
 
+### Auditoría en vivo de los enlaces, undécima tanda (2026-09-21) — Carlos reportó enlaces rotos en producción
+
+Carlos probó los enlaces reales en producción y reportó tres síntomas: algunos "no salían" (nada),
+otros redirigían al mercado por defecto del exchange (BTC, "porque no encuentra el par"), y otros
+daban un "bloqueo regional" al abrirlos. Se auditó en vivo con el **navegador real del usuario**
+(no WebFetch, que sale desde otra IP/región y por tanto no puede reproducir un bloqueo geográfico) —
+se tomó un export real de la tabla Ranking (777 filas) y se probó cada dominio de exchange presente
+en ella, con símbolos normales y a propósito con los casos raros (tokens de una letra, acciones
+tokenizadas, forex, un token literalmente llamado "4"):
+
+- **Las 19 plantillas `confirmed=True` cargaron el mercado correcto**, ninguna redirigió a BTC por no
+  encontrar el par — el formato de URL de cada una está bien. La única lectura ambigua fue ApeX
+  (AR-USDT) en el primer intento: la SPA tarda en cargar y una lectura demasiado rápida de la página
+  mostró todo a cero — una segunda lectura, un poco después, mostró el precio y símbolo correctos.
+  No es un bug, es una SPA lenta; queda anotado por si se vuelve a auditar en el futuro.
+- **Los 6 exchanges sin plantilla** (`htx`, `extended`, `risex`, `nado`, `hibachi`, `vertex`) cargaron
+  su página general sin errores — funcionan tal como están diseñados, aunque a un usuario le puede
+  seguir pareciendo "no sale nada" al no haber símbolo preseleccionado (ya avisado por el caption de
+  la interfaz).
+- **Encontrados dos bloqueos regionales reales — esto es lo que describió Carlos**: OKX y Aster tienen
+  la plantilla de URL *correcta* (el símbolo se sustituye bien, `confirmed=True` se mantiene), pero el
+  propio exchange bloquea el producto entero para la región del usuario:
+  - **OKX**: cualquier URL `trade-swap` (probado con BTC y con un símbolo raro, "2Z") muestra, en
+    español: *"Este producto no está disponible actualmente en tu país o región debido a las leyes y
+    normativas locales."* — bloqueo de OKX a nivel de producto (derivados/perpetuos para retail en la
+    UE, coherente con MiCA/ESMA), no un fallo del enlace.
+  - **Aster**: TODO `asterdex.com` devuelve un 403 de CloudFront ("ERROR: The request could not be
+    satisfied"), incluida la home sin ningún símbolo. Contraste que confirma que es geográfico y no
+    una caída general: la misma URL cargó bien vía WebFetch (otra IP/región).
+  - Se añadió un campo nuevo, `region_note`, a `ExchangeLink` (distinto de `confirmed=False`: aquí el
+    formato SÍ es correcto, es el destino el que rechaza la región) y un conjunto
+    `REGION_RESTRICTED_EXCHANGES` calculado del diccionario. La interfaz muestra un segundo caption
+    (🌍) bajo la tabla de Ranking explicando esto, separado del caption de "sin confirmar" (⚠️) para no
+    mezclar dos problemas distintos.
+- **Bug real encontrado y corregido**: el `fallback_url` de Vertex (`app.vertexprotocol.com/trade`)
+  ya no existe — devuelve un 404 `DEPLOYMENT_NOT_FOUND` de Vercel. Se comprobó también el dominio
+  oficial listado en CoinMarketCap (`vertexprotocol.io`) y tampoco cargó. Una búsqueda del nombre del
+  proyecto en la web devuelve mayoritariamente dominios clon con pinta de phishing (`*.pages.dev`,
+  `*.typedream.app`, con nombres como "vertex-exxchanges-us") — **a propósito no se sustituyó por
+  ninguno de esos resultados ni se adivinó un dominio nuevo**, mismo criterio de "nunca inventar" de
+  todo el proyecto. El fallback de Vertex ahora es un buscador genérico sin símbolo, hasta poder
+  confirmar a mano cuál es (si lo hay) el sitio oficial vigente.
+
+No se tocó ninguna de las 19 plantillas confirmadas — el problema no era el formato de las URLs, sino
+(a) dos bloqueos geográficos reales del lado del exchange y (b) un fallback muerto. Confirmado con 2
+tests nuevos en `test_exchange_links.py` (7/7 en el módulo): que OKX/Aster mantienen `confirmed=True`
+con la URL correcta y exponen su `region_note`, y que el fallback de Vertex ya no apunta al deployment
+muerto de Vercel. Suite completa del proyecto: **145/145**.
+
 ## Investigando (2026-09-18): oportunidades con long y short en el MISMO exchange
 
 El usuario exportó el Ranking completo a CSV (912 filas) para buscar dónde

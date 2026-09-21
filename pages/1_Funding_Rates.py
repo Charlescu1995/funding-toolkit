@@ -18,7 +18,7 @@ from connectors.exchange_links import REGION_RESTRICTED_EXCHANGES, UNCONFIRMED_E
 from core.aggregate import build_matrix, exchange_columns
 from core.data_service import fetch_normalized_rates, filter_rates
 from core.history import WINDOWS_HOURS, historical_apr_all_windows, init_db
-from core.normalize import NormalizedRate
+from core.matrix_view import render_matrix_html
 from core.opportunities import (
     LOW_LIQUIDITY_FLOOR_USD,
     apply_oi_map,
@@ -35,23 +35,6 @@ from core.opportunities import (
 # pares sería lento y quemaría el rate limit para nada — solo importa la
 # profundidad de las pocas que ya decidiste mirar.
 OI_ENRICH_TOP_N = 10
-
-# Paleta compartida con el resto del toolkit (mismo verde/ámbar/rojo que el
-# informe de análisis inicial), para que la matriz se sienta parte de la
-# misma herramienta.
-_GREEN = (94, 230, 196)   # mejor para ir LONG (tasa más baja)
-_AMBER = (240, 180, 41)   # neutral
-_RED = (240, 87, 107)     # mejor para ir SHORT (tasa más alta)
-
-
-def _lerp_color(c1: tuple[int, int, int], c2: tuple[int, int, int], t: float) -> tuple[int, int, int]:
-    return tuple(round(a + (b - a) * t) for a, b in zip(c1, c2))
-
-
-def _apr_cell_color(value: float, vmin: float = -50, vmax: float = 50) -> str:
-    t = max(0.0, min(1.0, (value - vmin) / (vmax - vmin)))
-    rgb = _lerp_color(_GREEN, _AMBER, t / 0.5) if t < 0.5 else _lerp_color(_AMBER, _RED, (t - 0.5) / 0.5)
-    return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
 
 
 def _fmt_usd(value: float | None) -> str:
@@ -75,45 +58,6 @@ def _fmt_usd(value: float | None) -> str:
     if value >= 1_000_000:
         return f"${value / 1_000_000:,.1f}M"
     return f"${value:,.0f}"
-
-
-def render_matrix_html(matrix: dict[str, dict[str, NormalizedRate]], columns: list[str]) -> str:
-    header = "".join(f"<th style='padding:8px 14px;text-align:right;font-weight:600;'>{ex}</th>" for ex in columns)
-    rows_html = []
-    for symbol in sorted(matrix):
-        row = matrix[symbol]
-        values = {ex: r.apr_pct for ex, r in row.items()}
-        best_long = min(values, key=values.get) if len(values) >= 2 else None
-        best_short = max(values, key=values.get) if len(values) >= 2 else None
-
-        cells = [f"<td style='padding:8px 14px;font-weight:600;'>{symbol}</td>"]
-        for ex in columns:
-            if ex not in row:
-                cells.append(
-                    "<td style='padding:8px 14px;text-align:right;color:#5b6472;'>—</td>"
-                )
-                continue
-            apr = row[ex].apr_pct
-            bg = _apr_cell_color(apr)
-            tag = ""
-            if ex == best_long:
-                tag = " · LONG"
-            elif ex == best_short:
-                tag = " · SHORT"
-            cells.append(
-                f"<td style='padding:8px 14px;text-align:right;background:{bg};color:#0b0e14;"
-                f"font-weight:700;border-radius:4px;'>{apr:+.1f}%{tag}</td>"
-            )
-        rows_html.append(f"<tr>{''.join(cells)}</tr>")
-
-    return f"""
-    <div style="overflow-x:auto;">
-    <table style="width:100%;border-collapse:separate;border-spacing:0 4px;font-size:14px;">
-      <thead><tr><th style='padding:8px 14px;text-align:left;'>Símbolo</th>{header}</tr></thead>
-      <tbody>{''.join(rows_html)}</tbody>
-    </table>
-    </div>
-    """
 
 
 st.set_page_config(page_title="Funding Rates — Funding Toolkit", page_icon="📊", layout="wide")
@@ -452,7 +396,10 @@ with tab_ranking:
         )
 
 with tab_matrix:
-    st.caption("Cada símbolo contra cada exchange, sin pre-filtrar — el dato crudo, estilo Loris.")
+    st.caption(
+        "Cada símbolo contra cada exchange, sin pre-filtrar — el dato crudo, estilo Loris. "
+        "Haz clic en cualquier porcentaje para abrir ese par directamente en ese exchange."
+    )
     matrix = build_matrix(rates)
     columns = exchange_columns(rates)
 
@@ -461,6 +408,21 @@ with tab_matrix:
     # column_config — así que aquí controlamos el pixel exacto nosotros.
     st.markdown(render_matrix_html(matrix, columns), unsafe_allow_html=True)
     st.caption("Verde = mejor sitio para ir long (te pagan más). Rojo = mejor sitio para ir short.")
+    if UNCONFIRMED_EXCHANGES:
+        st.caption(
+            "? = "
+            + ", ".join(sorted(UNCONFIRMED_EXCHANGES))
+            + ": no se pudo confirmar en vivo un enlace directo al símbolo — el clic lleva a la "
+            "página general de trading de ese exchange, no al par concreto (mismo criterio que "
+            "'Abrir Long'/'Abrir Short' en el Ranking, ver aviso ⚠️ en esa pestaña)."
+        )
+    if REGION_RESTRICTED_EXCHANGES:
+        st.caption(
+            "🌍 = "
+            + ", ".join(sorted(REGION_RESTRICTED_EXCHANGES))
+            + ": el enlace apunta al par correcto, pero el propio exchange puede bloquear el "
+            "producto según tu país (confirmado en vivo desde España, 2026-09-21)."
+        )
 
 with tab_history:
     st.caption("APR histórico real, calculado a partir de snapshots guardados (no la tasa instantánea).")

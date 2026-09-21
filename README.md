@@ -1492,6 +1492,83 @@ oportunidad que muy probablemente no se pueda operar. Confirmado con el test exi
 (`test_has_low_liquidity_uses_real_csv_evidence`, con un caso nuevo específico para MOG) y toda la
 suite del proyecto: 145/145.
 
+### Log de despliegue revisado, decimotercera tanda (2026-09-21, noche) — Binance/Bybit/Vertex/ApeX en el mismo log, nada nuevo que arreglar
+
+Carlos pegó el log completo de un despliegue nuevo en Streamlit Cloud (sin pregunta, solo el log). Se
+revisó línea por línea contra lo que ya está documentado en este README y en el docstring de
+`connectors/dex_apex.py`, para no repetir ningún hallazgo ni tratar como nuevo algo que ya se conocía:
+
+- **Binance (`451`) y Bybit (`403` CloudFront)**: exactamente el mismo bloqueo que ya se documentó en
+  el despliegue del 2026-09-20 más arriba ("los fallos de binance... y bybit... son el mismo bloqueo de
+  siempre en el hosting de Streamlit Cloud, no relacionado con este cambio"). Los dos son bloqueos del
+  lado del exchange contra el rango de IPs compartidas de Streamlit Community Cloud (Binance por motivo
+  legal/geográfico — 451 es literalmente el código HTTP de "no disponible por razones legales" —, Bybit
+  vía su CDN de CloudFront) — no algo que se pueda arreglar desde el código de este proyecto, igual que
+  los bloqueos regionales de OKX y Aster documentados en la undécima tanda. La app ya los maneja bien:
+  `core/data_service.py::load_data()` atrapa la excepción de cada conector por separado (`errors[conn.name]
+  = ...`), el resto de exchanges sigue funcionando, y `pages/1_Funding_Rates.py` los enseña en el banner
+  ⚠️ "Algunos exchanges no respondieron" en vez de tirar la app entera o esconder el motivo en un log que
+  nadie ve.
+- **Vertex (`SSLEOFError` contra `gateway.prod.vertexprotocol.com`)**: mismo fallo de conexión ya descrito
+  en la quinta tanda ("Confirmado en el primer despliegue real: Vertex bloqueado") — sigue sin responder
+  desde Streamlit Cloud, sin nada nuevo que investigar.
+- **ApeX (`87/186` símbolos con `403`, ~47%)**: comparado con el dato ya documentado del 2026-09-18
+  ("ApeX dio 403 en 186/186 símbolos (el 100%)"), esto es en realidad una MEJORA respecto a la última vez
+  que se confirmó el bloqueo — antes fallaba el 100%, ahora "solo" el 47%, es decir 99 símbolos reales sí
+  están llegando en este despliegue. No hay una explicación confirmable de por qué (podría ser que ApeX
+  solo bloquea parte del rango de IPs de Streamlit Cloud, o que el bloqueo es intermitente) — se deja
+  constancia del dato sin inventar una causa. El conector (`connectors/dex_apex.py`) ya está preparado
+  para este escenario desde la quinta tanda: descarta símbolo a símbolo sin tirar el resto, y el mensaje
+  de error ya distingue explícitamente "esto es un bloqueo de red, no un bug" cuando la proporción de 403
+  es alta.
+
+**Conclusión**: nada en este log es un hallazgo nuevo ni requiere ningún cambio de código — es la misma
+familia de bloqueos de red del lado del exchange contra la infraestructura compartida de Streamlit Cloud
+que ya se documentó en tandas anteriores, y la app ya está diseñada para no romperse cuando pasa (degradar
+por exchange, no ocultar el motivo). No se ha tocado ningún archivo de código en esta tanda — solo esta
+nota de confirmación en el README.
+
+### Matriz clicable, decimocuarta tanda (2026-09-21, noche) — cada % abre directamente el par en su exchange
+
+Carlos mandó un screenshot real de la matriz de **Loris.tools** (símbolo × exchange, con el propio % de
+cada celda como enlace clicable al par exacto) y preguntó si se podía hacer lo mismo en la pestaña
+"🔲 Matriz" de Funding Toolkit, que ya existe desde el Paso 6 con el mismo formato (símbolo × exchange, sin
+pre-filtrar) pero con las celdas como texto plano, no como enlace.
+
+**Se reutilizó `build_link()` de `connectors/exchange_links.py`** — el mismo módulo que ya construye
+"Abrir Long"/"Abrir Short" en el Ranking — en vez de montar una lógica de URLs nueva y duplicada:
+`render_matrix_html()` ahora llama a `build_link(exchange, symbol)` por cada celda con dato y envuelve el
+`{apr:+.1f}%` en un `<a href=...>`. Hereda automáticamente el mismo criterio de "nunca inventar" que ya
+tiene el Ranking, con dos marcadores nuevos en la propia celda (además del `title` al pasar el ratón):
+
+- **`?`** para los exchanges sin patrón de URL confirmado en vivo (`UNCONFIRMED_EXCHANGES`) — el enlace
+  sigue funcionando (lleva a la página general de trading), pero avisa de que no apunta al símbolo exacto.
+- **`🌍`** para los exchanges con bloqueo regional confirmado (`REGION_RESTRICTED_EXCHANGES`, hoy OKX y
+  Aster) — aquí el enlace SÍ es al símbolo exacto, el aviso es solo sobre el posible bloqueo del propio
+  exchange según el país.
+
+Se añadieron dos captions nuevos debajo de la matriz explicando ambos marcadores (mismo texto que ya
+usan los avisos ⚠️/🌍 del Ranking, para no obligar a Carlos a cambiar de pestaña para entender el símbolo).
+
+**Refactor pequeño en el mismo cambio**: `render_matrix_html()` vivía dentro de `pages/1_Funding_Rates.py`
+(el script de la página Streamlit), lo que hacía imposible testearlo de forma aislada — importar ese
+archivo directamente ejecuta la página entera (`st.set_page_config`, fetch de datos en vivo...). Se movió,
+junto con `apr_cell_color()`/`_lerp_color()`, a un módulo nuevo sin ninguna dependencia de Streamlit,
+`core/matrix_view.py`; la página ahora solo lo importa. Confirmado con 5 tests nuevos
+(`test_matrix_links.py`): enlace exacto para un exchange confirmado, marcador `?` + enlace de fallback
+para uno sin confirmar (elegido dinámicamente de `UNCONFIRMED_EXCHANGES`, no hardcodeado), marcador 🌍 +
+enlace exacto para OKX, celda sin dato sigue siendo un guion sin intentar construir ningún enlace, y
+símbolos con caracteres especiales salen escapados en el HTML (nunca hoy en la práctica, pero por
+seguridad). Suite completa del proyecto: **150/150** (los 145 anteriores + estos 5).
+
+*Nota aparte, no relacionada con este cambio*: al correr la suite completa se encontró que
+`test_volume.py` (un archivo de test antiguo, sin funciones `def test_*` — es un script que hace sus
+asserts a nivel de módulo, no la convención actual del proyecto) falla al importarse por un desajuste de
+escala en el volumen de GRVT (`connectors/dex_grvt.py`): el valor calculado sale 10⁹ veces más alto de lo
+esperado por el test. No se ha investigado ni arreglado en esta tanda — no es parte de lo que pidió Carlos
+y no afecta a la cuenta de 150/150 de arriba (que usa solo los archivos con `def test_*`, la convención
+actual) — queda anotado aquí para no perderlo de vista.
+
 ## Investigando (2026-09-18): oportunidades con long y short en el MISMO exchange
 
 El usuario exportó el Ranking completo a CSV (912 filas) para buscar dónde

@@ -1309,6 +1309,83 @@ pipeline end-to-end completo de `fetch_funding_rates()` para Phemex, y el
 fallback de Open Interest para ambos exchanges. Suite completa del
 proyecto: 138/138 (los 126 anteriores + estos 12).
 
+**Confirmado en producción (2026-09-20)**: primer deploy tras este cambio,
+revisado directamente en el log de Streamlit Cloud y en el panel
+"Diagnóstico: pares traídos por exchange" de la app. BingX apareció en el
+log con `bingx: 76 símbolo(s) descartado(s) por no estar en el listado
+oficial de mercados operables` — el mismo filtro de fantasmas que ya
+funciona para Aster, señal de que `fetch_funding_rates()` corrió con
+éxito — y el panel de diagnóstico confirmó `"bingx": 845` pares reales.
+Phemex no dejó ningún rastro en el log (ni el traceback de
+`Fallo al pedir funding rates a phemex` que sí sale para binance/bybit/
+vertex cuando fallan de verdad, ni ningún símbolo fantasma que reportar),
+lo cual ya era buena señal por descarte — pero se confirmó del todo con el
+panel de diagnóstico: `"phemex": 108` pares reales, sin errores. Los
+fallos de binance (451, bloqueo geográfico) y bybit (403, Cloudfront) en
+ese mismo log son el mismo bloqueo de siempre en el hosting de Streamlit
+Cloud, no relacionado con este cambio.
+
+### Enlaces directos a cada exchange, décima tanda (punto 5 de la lista de Carlos/Charles, 2026-09-21)
+
+Origen: comparando la herramienta con Smartbitrage (competidor adicional que Carlos trajo, con una
+lista de 5 puntos fundamentales a preguntarle a un desarrollador — "Charles" — sobre otra
+implementación), el punto 5 era "links directos a cada exchange, igual que Lending y LP: nada de
+wallets ni ejecución desde Kusi". Ya estaba identificado como quick-win en `comparativa-competidores.md`
+("no depende de tener servidor"), y al revisar el código se confirmó que no existía absolutamente
+ningún enlace a ningún exchange en ningún sitio del proyecto.
+
+**Diseño**: un único módulo nuevo, `connectors/exchange_links.py`, con un diccionario
+`EXCHANGE_LINKS` (exchange → plantilla de URL con `{base}`/`{base_lower}`) y una función
+`build_link(exchange, base_symbol) -> (url, confirmado)`. La tabla de Ranking (`pages/1_Funding_Rates.py`)
+añade dos columnas nuevas, "Abrir Long" y "Abrir Short", calculadas fila a fila a partir del símbolo
+ya normalizado (`o.symbol`) y el exchange de cada pierna, mostradas con `st.column_config.LinkColumn`.
+
+**Evidencia real, no inventada**: se investigaron en vivo (5 agentes en paralelo, WebSearch +
+WebFetch contra una página real de cada exchange — nunca por analogía con otro exchange parecido)
+los 25 exchanges activos del proyecto. De 25, **19 tienen un patrón de URL por símbolo confirmado en
+vivo** (canonical tag o título de página coincidiendo con el símbolo real, ej. `binance.com/en/futures/BTCUSDT`,
+`app.hyperliquid.xyz/trade/BTC`, `bingx.com/en/perpetual/BTC-USDT`) — cada plantilla y su fuente
+exacta quedan documentadas en el propio código, exchange por exchange. Cada exchange tiene su propia
+convención de separador/mayúsculas que NO se puede asumir de otro (confirmado, no adivinado): OKX es
+el único en minúsculas con sufijo `-swap`; KuCoin lleva una "M" final tras USDT (`BTCUSDTM`); gate/
+MEXC usan guion bajo; bingx/phemex/paradex/GRVT usan guion; edgeX usa sufijo `USD` aunque liquide en
+USDC; Backpack usa `_USD_PERP` en la web aunque su propia API use `_USDC_PERP`; Hyperliquid/Lighter/
+Pacifica/Variational no llevan ningún sufijo de quote, solo el ticker base.
+
+**6 de los 25 exchanges se dejan sin patrón confirmado, a propósito** (`htx`, `extended`, `risex`,
+`nado`, `hibachi`, `vertex` — ver `UNCONFIRMED_EXCHANGES` en el propio módulo, calculado del
+diccionario, nunca una lista aparte que se pueda desincronizar): HTX es una SPA tan dependiente de
+JavaScript que ni siquiera se pudo verificar en vivo si su parámetro `?contract_code=` funciona de
+verdad; Extended tiene la app confirmada pero ninguna evidencia de que la URL preseleccione el
+mercado; RiseX solo tiene el patrón confirmado en TESTNET, su mainnet (mismo dominio `rise.trade` que
+ya usa nuestro conector real) sigue detrás de una whitelist; Nado solo dio un único ejemplo en vivo
+sin poder confirmar que generaliza, y parece estar en alpha cerrada; Hibachi y Vertex no tienen NINGÚN
+patrón documentado ni indexado en ningún sitio (Vertex es coherente con ser ya el conector menos
+confirmable de todo el proyecto). Para estos 6, `build_link()` devuelve la página general de trading
+del exchange, SIN símbolo preseleccionado, en vez de inventar una URL que podría no funcionar — la
+interfaz avisa explícitamente de cuáles son con un caption bajo la tabla de Ranking.
+
+**A prueba de exchange nuevo sin registrar**: si algún día se añade un exchange nuevo y alguien se
+olvida de darle entrada en `EXCHANGE_LINKS`, `build_link()` no lanza ni devuelve `None` — cae a una
+búsqueda de Google genérica con el nombre del exchange y el símbolo, mismo criterio de "nunca un hueco
+silencioso" que el resto del proyecto. Un test (`test_all_active_exchanges_are_registered`) confirma
+además que los 25 exchanges activos (`ALL_CEX_FACTORIES` + `ALL_DEX_FACTORIES`) están todos
+registrados hoy.
+
+**A prueba de cambiar a enlaces de referido en el futuro**: todo el diseño está pensado para que pasar
+de "enlace directo al mercado" a "enlace con código de afiliado/referido" sea cambiar el `template`/
+`fallback_url` de la entrada correspondiente en `EXCHANGE_LINKS` — nada más en el proyecto depende del
+formato exacto de la URL, solo de la función `build_link()`.
+
+Confirmado con 5 tests nuevos (`test_exchange_links.py`): registro completo de los 25 exchanges
+activos, sustitución correcta del símbolo en 19 plantillas confirmadas (incluida la convención
+distinta de cada una), que los 6 exchanges sin patrón caen a su página general sin inventar un
+símbolo en la URL, que un exchange no registrado cae a una búsqueda genérica en vez de un enlace roto,
+y que un símbolo con prefijo de multiplicador (Hallazgo #17, "1000PEPE") pasa igual sin que
+`build_link()` intente "arreglarlo". Además, un smoke test con `streamlit.testing.v1.AppTest` confirma
+que la página completa carga sin excepciones y que las dos columnas nuevas salen con URLs reales en
+el dataframe. Suite completa del proyecto: 143/143 (los 138 anteriores + estos 5).
+
 ## Investigando (2026-09-18): oportunidades con long y short en el MISMO exchange
 
 El usuario exportó el Ranking completo a CSV (912 filas) para buscar dónde

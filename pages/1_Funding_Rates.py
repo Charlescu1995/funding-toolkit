@@ -14,6 +14,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from connectors.exchange_links import UNCONFIRMED_EXCHANGES, build_link
 from core.aggregate import build_matrix, exchange_columns
 from core.data_service import fetch_normalized_rates, filter_rates
 from core.history import WINDOWS_HOURS, historical_apr_all_windows, init_db
@@ -332,6 +333,14 @@ with tab_ranking:
                 "por debajo del piso de liquidez y/o Price Spread implausible)."
             )
 
+        # Links directos a cada exchange (punto 5 de la lista de Carlos/
+        # Charles, 2026-09-21, ver connectors/exchange_links.py): se
+        # calculan aquí, fila a fila, a partir del símbolo base ya
+        # normalizado (o.symbol) y el exchange de cada pierna -- build_link()
+        # nunca lanza ni devuelve None, así que no hace falta try/except.
+        long_links = [build_link(o.long_exchange, o.symbol) for o in opportunities]
+        short_links = [build_link(o.short_exchange, o.symbol) for o in opportunities]
+
         df = pd.DataFrame(
             [
                 {
@@ -349,8 +358,12 @@ with tab_ranking:
                     "Vol 24h short ($)": o.volume_short_usd,
                     "Cuello de botella Vol ($)": o.volume_bottleneck_usd,
                     "Lado Vol": o.volume_bottleneck_side or "—",
+                    "Abrir Long": long_url,
+                    "Abrir Short": short_url,
                 }
-                for o in opportunities
+                for o, (long_url, _long_confirmed), (short_url, _short_confirmed) in zip(
+                    opportunities, long_links, short_links
+                )
             ]
         )
 
@@ -382,8 +395,24 @@ with tab_ranking:
                 "Vol 24h long ($)": st.column_config.NumberColumn(format="compact"),
                 "Vol 24h short ($)": st.column_config.NumberColumn(format="compact"),
                 "Cuello de botella Vol ($)": st.column_config.NumberColumn(format="compact"),
+                "Abrir Long": st.column_config.LinkColumn(display_text="Abrir ↗"),
+                "Abrir Short": st.column_config.LinkColumn(display_text="Abrir ↗"),
             },
         )
+        if UNCONFIRMED_EXCHANGES:
+            # Ver connectors/exchange_links.py: para estos exchanges no se
+            # pudo confirmar en vivo un patrón de URL que preseleccione el
+            # símbolo (SPA sin ruta indexable, acceso con whitelist, o sin
+            # documentación) -- "Abrir Long"/"Abrir Short" llevan ahí a la
+            # página general de trading, SIN el símbolo puesto, en vez de
+            # inventar una URL que podría no funcionar.
+            st.caption(
+                "⚠️ Para "
+                + ", ".join(sorted(UNCONFIRMED_EXCHANGES))
+                + " no se pudo confirmar en vivo un enlace directo al símbolo exacto (interfaz muy "
+                "dependiente de JavaScript, acceso restringido, o sin documentación) — 'Abrir' lleva "
+                "a la página general de trading de ese exchange, no al par concreto."
+            )
         st.caption(
             "Price Spread: diferencia de precio (mark price) entre las dos piernas — un coste que "
             "se paga una sola vez al entrar y que puede comerse varios días de funding acumulado si "

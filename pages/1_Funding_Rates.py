@@ -427,6 +427,15 @@ with tab_ranking:
                 "producto por país."
             )
         st.caption(
+            "⏱️ Un enlace 'Abrir' puede fallar (o el exchange puede no reconocer el símbolo) aunque "
+            "la plantilla esté bien: el dato se saca con caché de 60s, y un mercado muy ilíquido "
+            "puede darse de baja entre que lo vemos aquí y que haces clic — caso real comprobado: "
+            "MOG en Bitget y ApeX, ambos exchanges dejaron de reconocer el símbolo en su propia API "
+            "justo después de aparecer como oportunidad, 2026-09-21. Cuanto más bajo el 'Cuello de "
+            "botella OI' de una pierna, más riesgo de esto — no es algo que se pueda arreglar desde "
+            "el enlace, es el propio mercado desapareciendo."
+        )
+        st.caption(
             "Price Spread: diferencia de precio (mark price) entre las dos piernas — un coste que "
             "se paga una sola vez al entrar y que puede comerse varios días de funding acumulado si "
             "sale alto; no confundir con el Spread APR, que es el beneficio recurrente. "

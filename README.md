@@ -1435,6 +1435,47 @@ tests nuevos en `test_exchange_links.py` (7/7 en el módulo): que OKX/Aster mant
 con la URL correcta y exponen su `region_note`, y que el fallback de Vertex ya no apunta al deployment
 muerto de Vercel. Suite completa del proyecto: **145/145**.
 
+### Caso MOG (Bitget + ApeX) — duodécima tanda (2026-09-21) — no es un bug de enlace, es un mercado que se dio de baja entre el fetch y el clic
+
+Carlos dio un contraejemplo concreto tras la auditoría de arriba: **MOG**, entonces #2 en el Ranking
+(long en Bitget, short en ApeX), se quedaba "parado" al abrir el enlace de Bitget, y el de ApeX
+"llevaba al de Bitcoin, porque no aparece el token en la plataforma". Se investigó pegándole
+directamente a la API de cada exchange (no solo a la web) para no repetir el error de leer una SPA
+antes de tiempo:
+
+- **Bitget**: `GET /api/v2/mix/market/ticker?symbol=MOGUSDT` (el mismo endpoint que usa la web) →
+  `{"code":"40034","msg":"Parameter MOGUSDT does not exist"}`. El endpoint de metadata/contratos
+  (`/api/v2/mix/market/contracts?symbol=MOGUSDT`) da el mismo error — Bitget ya no reconoce el símbolo
+  en ningún sitio, ni siquiera en su configuración. Esto explica el "se queda parado": la web pide un
+  mercado que el backend ya no tiene, y se queda esperando una respuesta que nunca llega con datos.
+- **ApeX**: `GET /v3/ticker?symbol=MOGUSDT` (el mismo endpoint que usa nuestro propio conector,
+  `connectors/dex_apex.py`) → `{"data":[],...}` — vacío. Con la ficha sin datos, la SPA de ApeX cae a
+  su vista por defecto, que da la sensación de "te lleva a Bitcoin".
+
+**Por qué esto NO es un bug de `exchange_links.py`**: las plantillas de Bitget y ApeX ya estaban
+confirmadas correctas con muchos otros símbolos (2Z, BTC, AR...) antes y después de este caso — el
+formato de la URL no tiene nada que ver. Tampoco es un fallo del filtro de "símbolos fantasma" que ya
+existe en `cex_ccxt.py` (pensado justo para este caso, ver el bug histórico de Aster/STORJ): cada
+fetch crea conectores nuevos (`core/data_service.py:32`, `[factory() for factory in ALL_CEX_FACTORIES]`),
+así que `load_markets()` se pide en vivo en cada ciclo, sin caché entre peticiones que pudiera quedarse
+desactualizada.
+
+**Lo que de verdad pasó, con evidencia**: en el momento en que la app sacó el dato, MOG SÍ tenía
+mercado real en las dos piernas — el enriquecimiento de OI (que hace una llamada en vivo por símbolo
+para el top 10, y MOG era el #2) tuvo éxito en ambas: **$330.573 de OI en Bitget** y solo **$3.484 de
+OI en ApeX** (columna "Cuello de botella OI" del CSV que mandó Carlos). Ese OI de ApeX ya era
+extremadamente fino, y el funding rate de esa pierna era descomunal (+4380% anualizado) — dos señales
+clásicas de un mercado a punto de perder soporte. La lectura más plausible, sin inventar nada más
+allá de lo confirmado: MOG se dio de baja en uno o ambos exchanges en la ventana entre que la app sacó
+el dato (caché de 60s) y que Carlos hizo clic — un riesgo real de cualquier scanner de funding rate
+contra mercados de baja capitalización, no algo que un cambio en el formato de la URL pueda arreglar.
+
+**Mitigación añadida**: verificar en vivo cada enlace antes de pintar la tabla no es viable (cientos de
+filas, rompería el patrón de "scan barato" de todo el proyecto). En su lugar se añadió un caption
+nuevo (⏱️) bajo la tabla de Ranking explicando este riesgo concreto y apuntando a la columna "Cuello de
+botella OI" como la señal ya disponible para detectarlo — cuanto más bajo ese número, más probable que
+el enlace falle por esto, no por un enlace mal construido.
+
 ## Investigando (2026-09-18): oportunidades con long y short en el MISMO exchange
 
 El usuario exportó el Ranking completo a CSV (912 filas) para buscar dónde
